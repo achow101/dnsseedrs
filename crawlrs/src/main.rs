@@ -1,4 +1,8 @@
+#![feature(ip)]
+
 use clap::Parser;
+use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 
 #[derive(Parser)]
 #[command(version, about, long_about)]
@@ -8,6 +12,78 @@ struct Args {
 
     #[arg(short, long)]
     db_file: Option<String>,
+}
+
+enum Network {
+    IPv4,
+    IPv6,
+    OnionV3,
+    I2P,
+    CJDNS,
+}
+
+struct NodeAddress {
+    host: String,
+    port: u16,
+    net: Network,
+}
+
+fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
+    let addr_parse_res = SocketAddr::from_str(&addr);
+    if addr_parse_res.is_ok() {
+        let parsed_addr = addr_parse_res.unwrap();
+        let ip = parsed_addr.ip().to_canonical();
+        if ip.is_ipv4() {
+            if !ip.is_global() {
+                return Err("IPv4 addresses must be globally accessible");
+            }
+            return Ok(NodeAddress {
+                host: ip.to_string(),
+                port: parsed_addr.port(),
+                net: Network::IPv4,
+            });
+        }
+        assert!(ip.is_ipv6());
+        if !ip.is_global() {
+            // Check for CJDNS in fc00::/8
+            if let IpAddr::V6(ip6) = ip {
+                if matches!(ip6.octets(), [0xfc, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _]) {
+                    return Ok(NodeAddress {
+                        host: ip.to_string(),
+                        port: parsed_addr.port(),
+                        net: Network::CJDNS,
+                    });
+                }
+            }
+            return Err("IPv6 addresses must be globally accessible or CJDNS");
+        }
+        return Ok(NodeAddress {
+            host: ip.to_string(),
+            port: parsed_addr.port(),
+            net: Network::IPv6,
+        });
+    }
+    let sp: Vec<&str> = addr.split(":").collect();
+    if sp.len() != 2 {
+        return Err("Invalid address, not IPv6 and multiple colons or colon not found");
+    }
+    let host = &sp[0];
+    let port = sp[1].parse::<u16>().unwrap();
+    if host.len() == 62 && host.ends_with(".onion") {
+        return Ok(NodeAddress{
+            host: host.to_string(),
+            port: port,
+            net: Network::OnionV3,
+        });
+    }
+    if host.len() == 60 && host.ends_with(".b32.i2p") {
+        return Ok(NodeAddress{
+            host: host.to_string(),
+            port: port,
+            net: Network::I2P,
+        });
+    }
+    return Err("Invalid address");
 }
 
 fn main() {
