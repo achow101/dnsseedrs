@@ -3,6 +3,10 @@
 use clap::Parser;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use std::time;
+use std::thread;
+
+use rusqlite::params;
 
 #[derive(Parser)]
 #[command(version, about, long_about)]
@@ -86,6 +90,26 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
     return Err("Invalid address");
 }
 
+fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
+    let node_addr = parse_address(addr).unwrap();
+    let netname = match node_addr.net {
+        Network::IPv4 => "ipv4",
+        Network::IPv6 => "ipv6",
+        Network::OnionV3 => "onionv3",
+        Network::I2P => "i2p",
+        Network::CJDNS => "cjdns",
+    };
+    println!("{} {} {}", node_addr.host, node_addr.port, netname);
+    /*
+    let node = connect_node(addr).unwrap();
+    let new_addrs = node.get_addrs();
+    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, NULL, NULL, NULL, NULL, NULL)").unwrap();
+    for na in new_addrs {
+        new_node_stmt.([arg]).unwrap();
+    }
+    */
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -101,5 +125,15 @@ fn main() {
     }
 
     let mut select_next_node = db_conn.prepare("SELECT address FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
-    let node: String = select_next_node.query_row([], |r| r.get(0),).unwrap();
+    let mut update_last_tried = db_conn.prepare("UPDATE nodes SET last_tried = ? WHERE address = ?").unwrap();
+    loop {
+        let node: String = select_next_node.query_row([], |r| r.get(0),).unwrap();
+        select_next_node.clear_bindings();
+
+        update_last_tried.execute(params![time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(), node]).unwrap();
+        update_last_tried.clear_bindings();
+
+        crawl_node(&db_conn, node);
+        thread::sleep(time::Duration::from_secs(1));
+    }
 }
