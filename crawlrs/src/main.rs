@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::time;
 use std::thread;
@@ -19,23 +19,17 @@ struct Args {
     db_file: Option<String>,
 }
 
-enum Network {
-    IPv4,
-    IPv6,
-    OnionV3,
-    I2P,
-    CJDNS,
-}
-
 enum Host {
-    Ip(IpAddr),
-    Host(String),
+    Ipv4(Ipv4Addr),
+    Ipv6(Ipv6Addr),
+    CJDNS(Ipv6Addr),
+    OnionV3(String),
+    I2P(String),
 }
 
 struct NodeAddress {
     host: Host,
     port: u16,
-    net: Network,
 }
 
 fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
@@ -47,31 +41,30 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
             if !ip.is_global() {
                 return Err("IPv4 addresses must be globally accessible");
             }
-            return Ok(NodeAddress {
-                host: Host::Ip(ip),
-                port: parsed_addr.port(),
-                net: Network::IPv4,
-            });
+            if let IpAddr::V4(ip4) = ip {
+                return Ok(NodeAddress {
+                    host: Host::Ipv4(ip4),
+                    port: parsed_addr.port(),
+                });
+            }
         }
         assert!(ip.is_ipv6());
-        if !ip.is_global() {
-            // Check for CJDNS in fc00::/8
-            if let IpAddr::V6(ip6) = ip {
+        if let IpAddr::V6(ip6) = ip {
+            if !ip6.is_global() {
+                // Check for CJDNS in fc00::/8
                 if matches!(ip6.octets(), [0xfc, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _]) {
                     return Ok(NodeAddress {
-                        host: Host::Ip(ip),
+                        host: Host::CJDNS(ip6),
                         port: parsed_addr.port(),
-                        net: Network::CJDNS,
                     });
                 }
+                return Err("IPv6 addresses must be globally accessible or CJDNS");
             }
-            return Err("IPv6 addresses must be globally accessible or CJDNS");
+            return Ok(NodeAddress {
+                host: Host::Ipv6(ip6),
+                port: parsed_addr.port(),
+            });
         }
-        return Ok(NodeAddress {
-            host: Host::Ip(ip),
-            port: parsed_addr.port(),
-            net: Network::IPv6,
-        });
     }
     let sp: Vec<&str> = addr.split(":").collect();
     if sp.len() != 2 {
@@ -81,16 +74,14 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
     let port = sp[1].parse::<u16>().unwrap();
     if host.len() == 62 && host.ends_with(".onion") {
         return Ok(NodeAddress{
-            host: Host::Host(host.to_string()),
+            host: Host::OnionV3(host.to_string()),
             port: port,
-            net: Network::OnionV3,
         });
     }
     if host.len() == 60 && host.ends_with(".b32.i2p") {
         return Ok(NodeAddress{
-            host: Host::Host(host.to_string()),
+            host: Host::I2P(host.to_string()),
             port: port,
-            net: Network::I2P,
         });
     }
     return Err("Invalid address");
@@ -155,14 +146,19 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
     let node_addr = parse_address(addr).unwrap();
     let sock = match node_addr.host {
-        Host::Ip(ip) => TcpStream::connect_timeout(&SocketAddr::new(ip, node_addr.port), time::Duration::from_secs(10)).unwrap(),
-        Host::Host(host) => {
-            let proxy = match node_addr.net {
-                Network::IPv4 | Network::IPv6 | Network::CJDNS => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
-                Network::OnionV3 => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050),
-                Network::I2P => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447),
-            };
-            let stream = TcpStream::connect(&proxy).unwrap();
+        Host::Ipv4(ip) => {
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), node_addr.port), time::Duration::from_secs(10)).unwrap()
+        },
+        Host::Ipv6(ip) | Host::CJDNS(ip) => {
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10)).unwrap()
+        },
+        Host::OnionV3(ref host) => {
+            let stream = TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050)).unwrap();
+            socks5_connect(&stream, &host, node_addr.port).unwrap();
+            stream
+        },
+        Host::I2P(ref host) => {
+            let stream = TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447)).unwrap();
             socks5_connect(&stream, &host, node_addr.port).unwrap();
             stream
         },
