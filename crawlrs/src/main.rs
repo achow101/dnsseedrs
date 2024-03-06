@@ -14,6 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::time;
 use std::thread;
+use threadpool::ThreadPool;
 
 use rusqlite::params;
 
@@ -40,6 +41,9 @@ struct Args {
 
     #[arg(short, long, default_value = "127.0.0.1:4447")]
     i2p_proxy: String,
+
+    #[arg(short, long, default_value_t = 20)]
+    threads: usize,
 }
 
 enum Host {
@@ -65,6 +69,7 @@ struct NodeInfo {
     protocol_version: u32,
 }
 
+#[derive(Clone)]
 struct NetStatus {
     ipv4: bool,
     ipv6: bool,
@@ -184,7 +189,8 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
     return Ok(());
 }
 
-fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo, net_status: &NetStatus) {
+fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
+    let db_conn = rusqlite::Connection::open(&db_file).unwrap();
     println!("Crawling {}", &node.addr_str);
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
@@ -420,6 +426,8 @@ fn main() {
         new_node_stmt.execute([arg]).unwrap();
     }
 
+    let pool = ThreadPool::new(args.threads);
+
     let mut select_next_node = db_conn.prepare("SELECT * FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
     loop {
         let node = select_next_node.query_row([], |r| {
@@ -439,10 +447,14 @@ fn main() {
         let since_tried = time_tried.elapsed();
         if since_tried.is_err() || since_tried.unwrap() < time::Duration::from_secs(60 * 10) {
             println!("Sleeping");
-            thread::sleep(time::Duration::from_secs(10));
+            thread::sleep(time::Duration::from_secs(1));
             continue;
         }
+        let db_file_c: String = db_file.clone();
+        let net_status_c: NetStatus = net_status.clone();
 
-        crawl_node(&db_conn, node, &net_status);
+        pool.execute(|| {
+            crawl_node(db_file_c, node, net_status_c);
+        });
     }
 }

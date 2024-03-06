@@ -11,6 +11,7 @@ bitcoin = "0.31.1"
 clap = { version = "4.5.1", features = ["derive"] }
 rusqlite = "0.31.0"
 sha3 = "0.10.8"
+threadpool = "1.8.1"
 
 [patch.crates-io]
 bitcoin = { git = "https://github.com/achow101/rust-bitcoin", branch = "fix-cjdns-decode-0.31" }
