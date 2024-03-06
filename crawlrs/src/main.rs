@@ -40,7 +40,17 @@ struct NodeAddress {
     port: u16,
 }
 
-fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
+struct NodeInfo {
+    addr_str: String,
+    last_tried: u64,
+    last_seen: u64,
+    user_agent: String,
+    services: u32,
+    starting_height: u32,
+    protocol_version: u32,
+}
+
+fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
     let addr_parse_res = SocketAddr::from_str(&addr);
     if addr_parse_res.is_ok() {
         let parsed_addr = addr_parse_res.unwrap();
@@ -151,14 +161,20 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
     return Ok(());
 }
 
-fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
-    println!("Trying to crawl from {}", addr);
+fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
+    println!("Trying to crawl from {}", &node.addr_str);
 
+    let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
     let mut update_last_tried = db_conn.prepare("UPDATE nodes SET last_tried = ? WHERE address = ?").unwrap();
-    update_last_tried.execute(params![time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(), node]).unwrap();
+    update_last_tried.execute(params![tried_timestamp, &node.addr_str]).unwrap();
     update_last_tried.clear_bindings();
 
-    let node_addr = parse_address(addr).unwrap();
+    // Prepare sql statements
+    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)").unwrap();
+    let mut update_last_seen = db_conn.prepare("UPDATE nodes SET last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?").unwrap();
+    let mut insert_tried = db_conn.prepare("INSERT INTO tried_log VALUES(?, ?, ?)").unwrap();
+
+    let node_addr = parse_address(&node.addr_str).unwrap();
     let sock_res = match node_addr.host {
         Host::Ipv4(ip) => {
             println!("Connect IPv4");
@@ -178,6 +194,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
         },
     };
     if sock_res.is_err() {
+        insert_tried.execute(params![node.addr_str, tried_timestamp, false]).unwrap();
         return ();
     }
     let sock = sock_res.unwrap();
@@ -188,6 +205,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
         },
     };
     if socks_proxy_res.is_err() {
+        insert_tried.execute(params![node.addr_str, tried_timestamp, false]).unwrap();
         return ();
     }
     println!("Connected");
@@ -230,7 +248,6 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
     println!("Sent sendaddrv2");
 
     // Receive loop
-    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, NULL, NULL, NULL, NULL, ?)").unwrap();
     loop {
         let msg = RawNetworkMessage::consensus_decode(&mut read_stream).unwrap();
         match msg.payload() {
@@ -244,6 +261,17 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
                 // Send getaddr
                 RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr{}).consensus_encode(&mut write_stream).unwrap();
                 println!("Sent getaddr");
+
+                update_last_seen.execute(params![
+                    time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(),
+                    ver.user_agent,
+                    ver.services.to_u64(),
+                    ver.start_height,
+                    ver.version,
+                    node.addr_str,
+                ]).unwrap();
+                update_last_seen.clear_bindings();
+                insert_tried.execute(params![node.addr_str, tried_timestamp, true]).unwrap();
             },
             NetworkMessage::Addr(addrs) => {
                 println!("Received addrv1");
@@ -318,17 +346,46 @@ fn main() {
     let db_file = args.db_file.unwrap_or("sqlite.db".to_string());
 
     let db_conn = rusqlite::Connection::open(&db_file).unwrap();
-    db_conn.execute("CREATE TABLE if NOT EXISTS 'nodes' (address TEXT PRIMARY KEY, last_tried INTEGER, last_seen INTEGER, user_agent TEXT, services INTEGER, starting_height INTEGER)", []).unwrap();
-    db_conn.execute("CREATE TABLE if NOT EXISTS 'tried_log' (address TEXT, timestamp INTEGER, online BOOL, FOREIGN KEY(address) REFERENCES nodes(address))", []).unwrap();
+    db_conn.execute(
+        "CREATE TABLE if NOT EXISTS 'nodes' (
+            address TEXT PRIMARY KEY,
+            last_tried INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            user_agent TEXT NOT NULL,
+            services INTEGER NOT NULL,
+            starting_height INTEGER NOT NULL,
+            protocol_version INTEGER NOT NULL,
+        )",
+        []
+    ).unwrap();
+    db_conn.execute(
+        "CREATE TABLE if NOT EXISTS 'tried_log' (
+            address TEXT,
+            timestamp INTEGER NOT NULL,
+            online BOOL NOT NULL,
+            FOREIGN KEY(address) REFERENCES nodes(address)
+        )",
+        []
+    ).unwrap();
 
-    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, NULL, NULL, NULL, NULL, NULL)").unwrap();
+    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', 0, 0, 0)").unwrap();
     for arg in args.seednode {
         new_node_stmt.execute([arg]).unwrap();
     }
 
-    let mut select_next_node = db_conn.prepare("SELECT address FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
+    let mut select_next_node = db_conn.prepare("SELECT address, last_tried, last_seen, user_agent, services, starting_height FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
     loop {
-        let node: String = select_next_node.query_row([], |r| r.get(0),).unwrap();
+        let node = select_next_node.query_row([], |r| {
+            Ok(NodeInfo {
+                addr_str: r.get(0)?,
+                last_tried: r.get(1)?,
+                last_seen: r.get(2)?,
+                user_agent: r.get(3)?,
+                services: r.get(4)?,
+                starting_height: r.get(5)?,
+                protocol_version: r.get(6)?,
+            })
+        }).unwrap();
         select_next_node.clear_bindings();
 
         crawl_node(&db_conn, node);
