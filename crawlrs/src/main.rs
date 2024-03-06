@@ -354,7 +354,7 @@ fn main() {
             user_agent TEXT NOT NULL,
             services INTEGER NOT NULL,
             starting_height INTEGER NOT NULL,
-            protocol_version INTEGER NOT NULL,
+            protocol_version INTEGER NOT NULL
         )",
         []
     ).unwrap();
@@ -373,7 +373,7 @@ fn main() {
         new_node_stmt.execute([arg]).unwrap();
     }
 
-    let mut select_next_node = db_conn.prepare("SELECT address, last_tried, last_seen, user_agent, services, starting_height FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
+    let mut select_next_node = db_conn.prepare("SELECT * FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
     loop {
         let node = select_next_node.query_row([], |r| {
             Ok(NodeInfo {
@@ -388,7 +388,14 @@ fn main() {
         }).unwrap();
         select_next_node.clear_bindings();
 
+        let time_tried = time::SystemTime::UNIX_EPOCH + time::Duration::from_secs(node.last_tried);
+        let since_tried = time_tried.elapsed();
+        if since_tried.is_err() || since_tried.unwrap() < time::Duration::from_secs(60 * 10) {
+            println!("Sleeping");
+            thread::sleep(time::Duration::from_secs(10));
+            continue;
+        }
+
         crawl_node(&db_conn, node);
-        thread::sleep(time::Duration::from_secs(1));
     }
 }
