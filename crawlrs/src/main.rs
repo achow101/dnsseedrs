@@ -152,25 +152,31 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 }
 
 fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
+    println!("Trying to crawl from {}", addr);
     let node_addr = parse_address(addr).unwrap();
     let sock = match node_addr.host {
         Host::Ipv4(ip) => {
+            println!("Connect IPv4");
             TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), node_addr.port), time::Duration::from_secs(10)).unwrap()
         },
         Host::Ipv6(ip) | Host::CJDNS(ip) => {
+            println!("Connect IPv6/CJDNS");
             TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10)).unwrap()
         },
         Host::OnionV3(ref host) => {
+            println!("Connect OnionV3");
             let stream = TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050)).unwrap();
             socks5_connect(&stream, &host, node_addr.port).unwrap();
             stream
         },
         Host::I2P(ref host) => {
+            println!("Connect I2P");
             let stream = TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447)).unwrap();
             socks5_connect(&stream, &host, node_addr.port).unwrap();
             stream
         },
     };
+    println!("Connected");
 
     let mut write_stream = BufWriter::new(&sock);
     let mut read_stream = BufReader::new(&sock);
@@ -202,29 +208,37 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
 
     // Send version message
     RawNetworkMessage::new(net_magic, NetworkMessage::Version(ver_msg)).consensus_encode(&mut write_stream).unwrap();
+    println!("Sent version");
 
     // Send sendaddrv2 message
     RawNetworkMessage::new(net_magic, NetworkMessage::SendAddrV2{}).consensus_encode(&mut write_stream).unwrap();
     write_stream.flush().unwrap();
+    println!("Sent sendaddrv2");
 
     // Receive loop
     loop {
         let msg = RawNetworkMessage::consensus_decode(&mut read_stream).unwrap();
         match msg.payload() {
             NetworkMessage::Version(ver) => {
+                println!("Received version");
+
                 // Send verack
                 RawNetworkMessage::new(net_magic, NetworkMessage::Verack{}).consensus_encode(&mut write_stream).unwrap();
+                println!("Sent verack");
 
                 // Send getaddr
                 RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr{}).consensus_encode(&mut write_stream).unwrap();
+                println!("Sent getaddr");
             },
             NetworkMessage::Addr(addrs) => {
+                println!("Received addrv1");
                 for (_, a) in addrs {
                     println!("Got addrv1 {}:{} with service flags {}", Ipv6Addr::from(a.address), a.port, a.services);
                 }
                 break
             },
             NetworkMessage::AddrV2(addrs) => {
+                println!("Received addrv2");
                 for a in addrs {
                     let addrstr = match a.addr {
                         AddrV2::Ipv4(ip) => ip.to_string(),
@@ -255,9 +269,10 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
                 break
             },
             NetworkMessage::Ping(ping) => {
+                println!("Received ping");
                 RawNetworkMessage::new(net_magic, NetworkMessage::Pong(*ping)).consensus_encode(&mut write_stream).unwrap();
             },
-            _ => (),
+            _ => println!("Received {}", msg.cmd().to_string()),
         };
         write_stream.flush().unwrap();
     }
