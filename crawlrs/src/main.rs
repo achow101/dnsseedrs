@@ -298,7 +298,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
                                 Err(..) => Err("IP type address couldn't be turned into SocketAddr")
                             }
                         },
-                        AddrV2::Cjdns(ip) => Ok("[" + ip.to_string() + "]:" + &a.port.to_string()),
+                        AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip.to_string(), &a.port.to_string())),
                         AddrV2::TorV2(host) => Err("who's advertising torv2????"),
                         AddrV2::TorV3(host) => {
                             let mut to_hash: Vec<u8> = vec![];
@@ -314,9 +314,9 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
                             to_enc.extend_from_slice(&checksum[0..2]);
                             to_enc.push(0x03);
 
-                            Ok((Base32Unpadded::encode_string(&to_enc) + ".onion:" + &a.port.to_string()).to_string())
+                            Ok(format!("{}.onion:{}", Base32Unpadded::encode_string(&to_enc), &a.port.to_string()).to_string())
                         },
-                        AddrV2::I2p(host) => Ok((Base32Unpadded::encode_string(&host) + ".b32.i2p:" + &a.port.to_string()).to_string()),
+                        AddrV2::I2p(host) => Ok(format!("{}.b32.i2p:{}", Base32Unpadded::encode_string(&host), &a.port.to_string()).to_string()),
                         _ => Err("unknown"),
                     };
                     match addrstr {
