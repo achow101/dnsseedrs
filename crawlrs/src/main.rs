@@ -184,11 +184,11 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
             println!("Connect IPv6/CJDNS");
             TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10))
         },
-        Host::OnionV3(ref host) => {
+        Host::OnionV3(..) => {
             println!("Connect OnionV3 socks proxy");
             TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050))
         },
-        Host::I2P(ref host) => {
+        Host::I2P(..) => {
             println!("Connect I2P socks proxy");
             TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447))
         },
@@ -299,7 +299,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
                             }
                         },
                         AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip.to_string(), &a.port.to_string())),
-                        AddrV2::TorV2(host) => Err("who's advertising torv2????"),
+                        AddrV2::TorV2(..) => Err("who's advertising torv2????"),
                         AddrV2::TorV3(host) => {
                             let mut to_hash: Vec<u8> = vec![];
                             to_hash.extend_from_slice(b".onion checksum");
@@ -314,7 +314,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
                             to_enc.extend_from_slice(&checksum[0..2]);
                             to_enc.push(0x03);
 
-                            Ok(format!("{}.onion:{}", Base32Unpadded::encode_string(&to_enc), &a.port.to_string()).to_string())
+                            Ok(format!("{}.onion:{}", Base32Unpadded::encode_string(&to_enc).trim_matches(char::from(0)), &a.port.to_string()).to_string())
                         },
                         AddrV2::I2p(host) => Ok(format!("{}.b32.i2p:{}", Base32Unpadded::encode_string(&host), &a.port.to_string()).to_string()),
                         _ => Err("unknown"),
