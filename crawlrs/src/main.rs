@@ -225,6 +225,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
     println!("Sent sendaddrv2");
 
     // Receive loop
+    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, NULL, NULL, NULL, NULL, ?)").unwrap();
     loop {
         let msg = RawNetworkMessage::consensus_decode(&mut read_stream).unwrap();
         match msg.payload() {
@@ -242,17 +243,29 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
             NetworkMessage::Addr(addrs) => {
                 println!("Received addrv1");
                 for (_, a) in addrs {
-                    println!("Got addrv1 {}:{} with service flags {}", Ipv6Addr::from(a.address), a.port, a.services);
+                    new_node_stmt.clear_bindings();
+                    match a.socket_addr() {
+                        Ok(s) => {
+                            new_node_stmt.execute([s.to_string(), a.services.to_u64().to_string()]).unwrap();
+                            println!("Got addrv1 {} with service flags {}", s.to_string(), a.services);
+                        },
+                        Err(..) => {},
+                    };
                 }
                 break
             },
             NetworkMessage::AddrV2(addrs) => {
                 println!("Received addrv2");
                 for a in addrs {
+                    new_node_stmt.clear_bindings();
                     let addrstr = match a.addr {
-                        AddrV2::Ipv4(ip) => ip.to_string(),
-                        AddrV2::Ipv6(ip) => ip.to_string(),
-                        AddrV2::TorV2(host) => "who's advertising torv2????".to_string(),
+                        AddrV2::Ipv4(..) | AddrV2::Ipv6(..) | AddrV2::Cjdns(..) => {
+                            match a.socket_addr() {
+                                Ok(s) => Ok(s.to_string()),
+                                Err(..) => Err("IP type address couldn't be turned into SocketAddr")
+                            }
+                        }
+                        AddrV2::TorV2(host) => Err("who's advertising torv2????"),
                         AddrV2::TorV3(host) => {
                             let mut to_hash: Vec<u8> = vec![];
                             to_hash.extend_from_slice(b".onion checksum");
@@ -267,13 +280,18 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
                             to_enc.extend_from_slice(&checksum[0..2]);
                             to_enc.push(0x03);
 
-                            (Base32Unpadded::encode_string(&to_enc) + ".onion").to_string()
+                            Ok((Base32Unpadded::encode_string(&to_enc) + ".onion:" + &a.port.to_string()).to_string())
                         },
-                        AddrV2::I2p(host) => (Base32Unpadded::encode_string(&host) + ".b32.i2p").to_string(),
-                        AddrV2::Cjdns(ip) => ip.to_string(),
-                        _ => "unknown".to_string(),
+                        AddrV2::I2p(host) => Ok((Base32Unpadded::encode_string(&host) + ".b32.i2p:" + &a.port.to_string()).to_string()),
+                        _ => Err("unknown"),
                     };
-                    println!("Got addrv2 {}:{} with service flags {}", addrstr, a.port, a.services);
+                    match addrstr {
+                        Ok(a_s) => {
+                            new_node_stmt.execute([&a_s, &a.services.to_u64().to_string()]).unwrap();
+                            println!("Got addrv2 {} with service flags {}", &a_s, a.services);
+                        }
+                        Err(..) => (),
+                    }
                 }
                 break
             },
