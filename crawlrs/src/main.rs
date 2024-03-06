@@ -26,8 +26,13 @@ enum Network {
     CJDNS,
 }
 
+enum Host {
+    Ip(IpAddr),
+    Host(String),
+}
+
 struct NodeAddress {
-    host: String,
+    host: Host,
     port: u16,
     net: Network,
 }
@@ -42,7 +47,7 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
                 return Err("IPv4 addresses must be globally accessible");
             }
             return Ok(NodeAddress {
-                host: ip.to_string(),
+                host: Host::Ip(ip),
                 port: parsed_addr.port(),
                 net: Network::IPv4,
             });
@@ -53,7 +58,7 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
             if let IpAddr::V6(ip6) = ip {
                 if matches!(ip6.octets(), [0xfc, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _]) {
                     return Ok(NodeAddress {
-                        host: ip.to_string(),
+                        host: Host::Ip(ip),
                         port: parsed_addr.port(),
                         net: Network::CJDNS,
                     });
@@ -62,7 +67,7 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
             return Err("IPv6 addresses must be globally accessible or CJDNS");
         }
         return Ok(NodeAddress {
-            host: ip.to_string(),
+            host: Host::Ip(ip),
             port: parsed_addr.port(),
             net: Network::IPv6,
         });
@@ -75,14 +80,14 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
     let port = sp[1].parse::<u16>().unwrap();
     if host.len() == 62 && host.ends_with(".onion") {
         return Ok(NodeAddress{
-            host: host.to_string(),
+            host: Host::Host(host.to_string()),
             port: port,
             net: Network::OnionV3,
         });
     }
     if host.len() == 60 && host.ends_with(".b32.i2p") {
         return Ok(NodeAddress{
-            host: host.to_string(),
+            host: Host::Host(host.to_string()),
             port: port,
             net: Network::I2P,
         });
@@ -99,7 +104,11 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
         Network::I2P => "i2p",
         Network::CJDNS => "cjdns",
     };
-    println!("{} {} {}", node_addr.host, node_addr.port, netname);
+    let hostname = match node_addr.host {
+        Host::Ip(ip) => ip.to_string(),
+        Host::Host(host) => host,
+    };
+    println!("{} {} {}", hostname, node_addr.port, netname);
     /*
     let node = connect_node(addr).unwrap();
     let new_addrs = node.get_addrs();
