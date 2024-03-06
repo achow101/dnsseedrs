@@ -1,7 +1,7 @@
 #![feature(ip)]
 
 use clap::Parser;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::time;
 use std::thread;
@@ -97,26 +97,18 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
 
 fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
     let node_addr = parse_address(addr).unwrap();
-    let netname = match node_addr.net {
-        Network::IPv4 => "ipv4",
-        Network::IPv6 => "ipv6",
-        Network::OnionV3 => "onionv3",
-        Network::I2P => "i2p",
-        Network::CJDNS => "cjdns",
+    let sock = match node_addr.host {
+        Host::Ip(ip) => TcpStream::connect_timeout(&SocketAddr::new(ip, node_addr.port), time::Duration::from_secs(10)).unwrap(),
+        Host::Host(host) => {
+            let proxy = match node_addr.net {
+                Network::IPv4 | Network::IPv6 | Network::CJDNS => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
+                Network::OnionV3 => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050),
+                Network::I2P => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447),
+            };
+            let stream = TcpStream::connect(&proxy).unwrap();
+            stream
+        },
     };
-    let hostname = match node_addr.host {
-        Host::Ip(ip) => ip.to_string(),
-        Host::Host(host) => host,
-    };
-    println!("{} {} {}", hostname, node_addr.port, netname);
-    /*
-    let node = connect_node(addr).unwrap();
-    let new_addrs = node.get_addrs();
-    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, NULL, NULL, NULL, NULL, NULL)").unwrap();
-    for na in new_addrs {
-        new_node_stmt.([arg]).unwrap();
-    }
-    */
 }
 
 fn main() {
