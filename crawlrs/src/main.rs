@@ -25,6 +25,21 @@ struct Args {
 
     #[arg(short, long)]
     db_file: Option<String>,
+
+    #[arg(long, default_value_t = true)]
+    ipv4_reachable: bool,
+
+    #[arg(long, default_value_t = true)]
+    ipv6_reachable: bool,
+
+    #[arg(short, long, default_value_t = false)]
+    cjdns_reachable: bool,
+
+    #[arg(short, long, default_value = "127.0.0.1:9050")]
+    onion_proxy: String,
+
+    #[arg(short, long, default_value = "127.0.0.1:4447")]
+    i2p_proxy: String,
 }
 
 enum Host {
@@ -48,6 +63,14 @@ struct NodeInfo {
     services: u32,
     starting_height: u32,
     protocol_version: u32,
+}
+
+struct NetStatus {
+    ipv4: bool,
+    ipv6: bool,
+    cjdns: bool,
+    onion_proxy: Option<String>,
+    i2p_proxy: Option<String>,
 }
 
 fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
@@ -161,7 +184,7 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
     return Ok(());
 }
 
-fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
+fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo, net_status: &NetStatus) {
     println!("Crawling {}", &node.addr_str);
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
@@ -176,34 +199,38 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
 
     let node_addr = parse_address(&node.addr_str).unwrap();
     let sock_res = match node_addr.host {
-        Host::Ipv4(ip) => {
+        Host::Ipv4(ip) if net_status.ipv4 => {
             TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), node_addr.port), time::Duration::from_secs(10))
         },
-        Host::Ipv6(ip) | Host::CJDNS(ip) => {
+        Host::Ipv6(ip) if net_status.ipv6 => {
             TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10))
         },
-        Host::OnionV3(..) => {
-            TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050))
+        Host::CJDNS(ip) if net_status.cjdns => {
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10))
         },
-        Host::I2P(..) => {
-            TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447))
+        Host::OnionV3(ref host) if net_status.onion_proxy.is_some() => {
+            let proxy_addr = net_status.onion_proxy.as_ref().unwrap();
+            let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
+            if stream.is_ok() {
+                socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port).unwrap();
+            }
+            stream
         },
+        Host::I2P(ref host) if net_status.i2p_proxy.is_some() => {
+            let proxy_addr = net_status.i2p_proxy.as_ref().unwrap();
+            let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
+            if stream.is_err() {
+                socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port).unwrap();
+            }
+            stream
+        },
+        _ => Err(std::io::Error::other("Net not available"))
     };
     if sock_res.is_err() {
         insert_tried.execute(params![node.addr_str, tried_timestamp, false]).unwrap();
         return ();
     }
     let sock = sock_res.unwrap();
-    let socks_proxy_res = match node_addr.host {
-        Host::Ipv4(..) | Host::Ipv6(..) | Host::CJDNS(..) => Ok(()),
-        Host::OnionV3(ref host) | Host::I2P(ref host) => {
-            socks5_connect(&sock, &host, node_addr.port)
-        },
-    };
-    if socks_proxy_res.is_err() {
-        insert_tried.execute(params![node.addr_str, tried_timestamp, false]).unwrap();
-        return ();
-    }
 
     let mut write_stream = BufWriter::new(&sock);
     let mut read_stream = BufReader::new(&sock);
@@ -334,6 +361,37 @@ fn main() {
 
     let db_file = args.db_file.unwrap_or("sqlite.db".to_string());
 
+    // Check proxies
+    let mut onion_proxy = Some(&args.onion_proxy);
+    let onion_proxy_check = TcpStream::connect_timeout(&SocketAddr::from_str(&args.onion_proxy).unwrap(), time::Duration::from_secs(10));
+    if onion_proxy_check.is_ok() {
+        if socks5_connect(&onion_proxy_check.as_ref().unwrap(), &"duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion".to_string(), 80).is_err() {
+            onion_proxy = None;
+        }
+        onion_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
+    } else {
+        onion_proxy = None;
+    }
+
+    let mut i2p_proxy = Some(&args.i2p_proxy);
+    let i2p_proxy_check = TcpStream::connect_timeout(&SocketAddr::from_str(&args.i2p_proxy).unwrap(), time::Duration::from_secs(10));
+    if i2p_proxy_check.is_ok() {
+        if socks5_connect(&i2p_proxy_check.as_ref().unwrap(), &"gqt2klvr6r2hpdfxzt4bn2awwehsnc7l5w22fj3enbauxkhnzcoq.b32.i2p".to_string(), 80).is_err() {
+            i2p_proxy = None;
+        }
+        i2p_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
+    } else {
+        i2p_proxy = None;
+    }
+
+    let net_status = NetStatus {
+        ipv4: args.ipv4_reachable,
+        ipv6: args.ipv4_reachable,
+        cjdns: args.cjdns_reachable,
+        onion_proxy: onion_proxy.cloned(),
+        i2p_proxy: i2p_proxy.cloned(),
+    };
+
     let db_conn = rusqlite::Connection::open(&db_file).unwrap();
     db_conn.execute(
         "CREATE TABLE if NOT EXISTS 'nodes' (
@@ -385,6 +443,6 @@ fn main() {
             continue;
         }
 
-        crawl_node(&db_conn, node);
+        crawl_node(&db_conn, node, &net_status);
     }
 }
