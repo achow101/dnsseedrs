@@ -153,6 +153,11 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 
 fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
     println!("Trying to crawl from {}", addr);
+
+    let mut update_last_tried = db_conn.prepare("UPDATE nodes SET last_tried = ? WHERE address = ?").unwrap();
+    update_last_tried.execute(params![time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(), node]).unwrap();
+    update_last_tried.clear_bindings();
+
     let node_addr = parse_address(addr).unwrap();
     let sock_res = match node_addr.host {
         Host::Ipv4(ip) => {
@@ -322,13 +327,9 @@ fn main() {
     }
 
     let mut select_next_node = db_conn.prepare("SELECT address FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
-    let mut update_last_tried = db_conn.prepare("UPDATE nodes SET last_tried = ? WHERE address = ?").unwrap();
     loop {
         let node: String = select_next_node.query_row([], |r| r.get(0),).unwrap();
         select_next_node.clear_bindings();
-
-        update_last_tried.execute(params![time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(), node]).unwrap();
-        update_last_tried.clear_bindings();
 
         crawl_node(&db_conn, node);
         thread::sleep(time::Duration::from_secs(1));
