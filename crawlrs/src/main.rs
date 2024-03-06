@@ -154,28 +154,37 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
     println!("Trying to crawl from {}", addr);
     let node_addr = parse_address(addr).unwrap();
-    let sock = match node_addr.host {
+    let sock_res = match node_addr.host {
         Host::Ipv4(ip) => {
             println!("Connect IPv4");
-            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), node_addr.port), time::Duration::from_secs(10)).unwrap()
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), node_addr.port), time::Duration::from_secs(10))
         },
         Host::Ipv6(ip) | Host::CJDNS(ip) => {
             println!("Connect IPv6/CJDNS");
-            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10)).unwrap()
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10))
         },
         Host::OnionV3(ref host) => {
-            println!("Connect OnionV3");
-            let stream = TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050)).unwrap();
-            socks5_connect(&stream, &host, node_addr.port).unwrap();
-            stream
+            println!("Connect OnionV3 socks proxy");
+            TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050))
         },
         Host::I2P(ref host) => {
-            println!("Connect I2P");
-            let stream = TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447)).unwrap();
-            socks5_connect(&stream, &host, node_addr.port).unwrap();
-            stream
+            println!("Connect I2P socks proxy");
+            TcpStream::connect(&SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447))
         },
     };
+    if sock_res.is_err() {
+        return ();
+    }
+    let sock = sock_res.unwrap();
+    let socks_proxy_res = match node_addr.host {
+        Host::Ipv4(..) | Host::Ipv6(..) | Host::CJDNS(..) => Ok(()),
+        Host::OnionV3(ref host) | Host::I2P(ref host) => {
+            socks5_connect(&sock, &host, node_addr.port)
+        },
+    };
+    if socks_proxy_res.is_err() {
+        return ();
+    }
     println!("Connected");
 
     let mut write_stream = BufWriter::new(&sock);
