@@ -1,6 +1,7 @@
 #![feature(ip)]
 
 use clap::Parser;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::time;
@@ -95,6 +96,62 @@ fn parse_address(addr: String) -> Result<NodeAddress, &'static str> {
     return Err("Invalid address");
 }
 
+fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(), &'static str> {
+    let mut write_stream = BufWriter::new(sock);
+    let mut read_stream = BufReader::new(sock);
+
+    // Send first socks message
+    // Version (0x05) | Num Auth Methods (0x01) | Auth Method NoAuth (0x00)
+    write_stream.write(&[0x05, 0x01, 0x00]).unwrap();
+    write_stream.flush().unwrap();
+
+    // Get Server's chosen auth method
+    let mut server_auth_method: [u8; 2] = [0; 2];
+    read_stream.read_exact(&mut server_auth_method).unwrap();
+    if server_auth_method[0] != 0x05 {
+        return Err("Server responded with unexpected Socks version");
+    }
+    if server_auth_method[1] != 0x00 {
+        return Err("Server responded with unsupported auth method");
+    }
+
+    // Send request
+    // Version (0x05) | Connect Command (0x01) | Reserved (0x00) | Domain name address type (0x03)
+    write_stream.write(&[0x05, 0x01, 0x00, 0x03]).unwrap();
+    // The destination we want the server to connect to
+    write_stream.write(&[u8::try_from(destination.len()).unwrap()]).unwrap();
+    write_stream.write(destination.as_bytes()).unwrap();
+    write_stream.write(&port.to_be_bytes()).unwrap();
+    write_stream.flush().unwrap();
+
+    // Get reply
+    let mut server_reply: [u8; 4] = [0; 4];
+    read_stream.read_exact(&mut server_reply).unwrap();
+    if server_reply[0] != 0x05 {
+        return Err("Server responded with unsupported auth method");
+    }
+    if server_reply[1] != 0x00 {
+        return Err("Server could not connect to destination");
+    }
+    if server_reply[2] != 0x00 {
+        return Err("Server responded with unexpected reserved value");
+    }
+    if server_reply[3] == 0x01 {
+        let mut server_bound_addr: [u8; 4] = [0; 4];
+        read_stream.read_exact(&mut server_bound_addr).unwrap();
+    } else if server_reply[3] == 0x03 {
+        let mut server_bound_addr_len: [u8; 1] = [0; 1];
+        read_stream.read_exact(&mut server_bound_addr_len).unwrap();
+        let mut server_bound_addr = vec![0u8; usize::from(server_bound_addr_len[0])];
+        read_stream.read_exact(&mut server_bound_addr).unwrap();
+    } else if server_reply[3] == 0x04 {
+        let mut server_bound_addr: [u8; 16] = [0; 16];
+        read_stream.read_exact(&mut server_bound_addr).unwrap();
+    }
+
+    return Ok(());
+}
+
 fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
     let node_addr = parse_address(addr).unwrap();
     let sock = match node_addr.host {
@@ -106,6 +163,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, addr: String) {
                 Network::I2P => SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4447),
             };
             let stream = TcpStream::connect(&proxy).unwrap();
+            socks5_connect(&stream, &host, node_addr.port).unwrap();
             stream
         },
     };
