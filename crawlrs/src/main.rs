@@ -292,12 +292,13 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
                 for a in addrs {
                     new_node_stmt.clear_bindings();
                     let addrstr = match a.addr {
-                        AddrV2::Ipv4(..) | AddrV2::Ipv6(..) | AddrV2::Cjdns(..) => {
+                        AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => {
                             match a.socket_addr() {
                                 Ok(s) => Ok(s.to_string()),
                                 Err(..) => Err("IP type address couldn't be turned into SocketAddr")
                             }
-                        }
+                        },
+                        AddrV2::Cjdns(ip) => Ok("[" + ip.to_string() + "]:" + &a.port.to_string()),
                         AddrV2::TorV2(host) => Err("who's advertising torv2????"),
                         AddrV2::TorV3(host) => {
                             let mut to_hash: Vec<u8> = vec![];
@@ -323,7 +324,7 @@ fn crawl_node(db_conn: &rusqlite::Connection, node: NodeInfo) {
                             new_node_stmt.execute([&a_s, &a.services.to_u64().to_string()]).unwrap();
                             println!("Got addrv2 {} with service flags {}", &a_s, a.services);
                         }
-                        Err(..) => (),
+                        Err(e) => println!("Error: {}", e),
                     }
                 }
                 break
