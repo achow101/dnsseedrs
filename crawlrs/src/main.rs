@@ -13,7 +13,7 @@ use sha3::{Digest, Sha3_256};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time;
 use std::thread;
 use threadpool::ThreadPool;
@@ -192,23 +192,15 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
     return Ok(());
 }
 
-fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
-    let db_conn = rusqlite::Connection::open(&db_file).unwrap();
-    db_conn.busy_handler(Some(|_| {
-        thread::sleep(time::Duration::from_secs(1));
-        return true;
-    })).unwrap();
+fn crawl_node(db_conn: Arc<Mutex<rusqlite::Connection>>, node: NodeInfo, net_status: NetStatus) {
     println!("Crawling {}", &node.addr_str);
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
-    let mut update_last_tried = db_conn.prepare("UPDATE nodes SET last_tried = ? WHERE address = ?").unwrap();
-    update_last_tried.execute(params![tried_timestamp, &node.addr_str]).unwrap();
-    update_last_tried.clear_bindings();
-
-    // Prepare sql statements
-    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)").unwrap();
-    let mut update_last_seen = db_conn.prepare("UPDATE nodes SET last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?").unwrap();
-    let mut insert_tried = db_conn.prepare("INSERT INTO tried_log VALUES(?, ?, ?)").unwrap();
+    {
+        // Update last tried now to avoid getting these again next time around
+        let locked_db_conn = db_conn.lock().unwrap();
+        locked_db_conn.execute("UPDATE nodes SET last_tried = ? WHERE address = ?", params![tried_timestamp, &node.addr_str]).unwrap();
+    }
 
     let node_addr = parse_address(&node.addr_str).unwrap();
     let sock_res = match node_addr.host {
@@ -240,7 +232,8 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
         _ => Err(std::io::Error::other("Net not available"))
     };
     if sock_res.is_err() {
-        insert_tried.execute(params![node.addr_str, tried_timestamp, false]).unwrap();
+        let locked_db_conn = db_conn.lock().unwrap();
+        locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![node.addr_str, tried_timestamp, false]).unwrap();
         return ();
     }
     let sock = sock_res.unwrap();
@@ -291,25 +284,31 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                 // Send getaddr
                 RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr{}).consensus_encode(&mut write_stream).unwrap();
 
-                update_last_seen.execute(params![
-                    time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(),
-                    ver.user_agent,
-                    ver.services.to_u64().to_be_bytes(),
-                    ver.start_height,
-                    ver.version,
-                    node.addr_str,
-                ]).unwrap();
-                update_last_seen.clear_bindings();
-                insert_tried.execute(params![node.addr_str, tried_timestamp, true]).unwrap();
+                let locked_db_conn = db_conn.lock().unwrap();
+                locked_db_conn.execute(
+                    "UPDATE nodes SET last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
+                    params![
+                        time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(),
+                        ver.user_agent,
+                        ver.services.to_u64().to_be_bytes(),
+                        ver.start_height,
+                        ver.version,
+                        node.addr_str,
+                    ]
+                ).unwrap();
+                locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![node.addr_str, tried_timestamp, true]).unwrap();
                 println!("Success {}", &node.addr_str);
             },
             NetworkMessage::Addr(addrs) => {
                 println!("Received addrv1 from {}", &node.addr_str);
                 for (_, a) in addrs {
-                    new_node_stmt.clear_bindings();
                     match a.socket_addr() {
                         Ok(s) => {
-                            new_node_stmt.execute(params![s.to_string(), a.services.to_u64().to_be_bytes()]).unwrap();
+                            let locked_db_conn = db_conn.lock().unwrap();
+                            locked_db_conn.execute(
+                                "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
+                                params![s.to_string(), a.services.to_u64().to_be_bytes()]
+                            ).unwrap();
                             println!("Got addrv1 {} with service flags {}", s.to_string(), a.services);
                         },
                         Err(..) => {},
@@ -320,7 +319,6 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
             NetworkMessage::AddrV2(addrs) => {
                 println!("Received addrv2 from {}", &node.addr_str);
                 for a in addrs {
-                    new_node_stmt.clear_bindings();
                     let addrstr = match a.addr {
                         AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => {
                             match a.socket_addr() {
@@ -350,8 +348,12 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                         _ => Err("unknown"),
                     };
                     match addrstr {
-                        Ok(a_s) => {
-                            new_node_stmt.execute(params![&a_s, &a.services.to_u64().to_be_bytes()]).unwrap();
+                        Ok(s) => {
+                            let locked_db_conn = db_conn.lock().unwrap();
+                            locked_db_conn.execute(
+                                "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
+                                params![s.to_string(), a.services.to_u64().to_be_bytes()]
+                            ).unwrap();
                         }
                         Err(e) => println!("Error: {}", e),
                     }
@@ -417,71 +419,81 @@ fn main() {
         i2p_proxy: i2p_proxy.cloned(),
     };
 
-    let db_conn = rusqlite::Connection::open(&db_file).unwrap();
-    db_conn.busy_handler(Some(|_| {
-        thread::sleep(time::Duration::from_secs(1));
-        return true;
-    })).unwrap();
-    db_conn.execute(
-        "CREATE TABLE if NOT EXISTS 'nodes' (
-            address TEXT PRIMARY KEY,
-            last_tried INTEGER NOT NULL,
-            last_seen INTEGER NOT NULL,
-            user_agent TEXT NOT NULL,
-            services BLOB NOT NULL,
-            starting_height INTEGER NOT NULL,
-            protocol_version INTEGER NOT NULL
-        )",
-        []
-    ).unwrap();
-    db_conn.execute(
-        "CREATE TABLE if NOT EXISTS 'tried_log' (
-            address TEXT,
-            timestamp INTEGER NOT NULL,
-            online BOOL NOT NULL,
-            FOREIGN KEY(address) REFERENCES nodes(address)
-        )",
-        []
-    ).unwrap();
+    let db_conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_file).unwrap()));
+    {
+        let locked_db_conn = db_conn.lock().unwrap();
+        locked_db_conn.busy_handler(Some(|_| {
+            thread::sleep(time::Duration::from_secs(1));
+            return true;
+        })).unwrap();
+        locked_db_conn.execute(
+            "CREATE TABLE if NOT EXISTS 'nodes' (
+                address TEXT PRIMARY KEY,
+                last_tried INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                user_agent TEXT NOT NULL,
+                services BLOB NOT NULL,
+                starting_height INTEGER NOT NULL,
+                protocol_version INTEGER NOT NULL
+            )",
+            []
+        ).unwrap();
+        locked_db_conn.execute(
+            "CREATE TABLE if NOT EXISTS 'tried_log' (
+                address TEXT,
+                timestamp INTEGER NOT NULL,
+                online BOOL NOT NULL,
+                FOREIGN KEY(address) REFERENCES nodes(address)
+            )",
+            []
+        ).unwrap();
 
-    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)").unwrap();
-    for arg in args.seednode {
-        new_node_stmt.execute(params![arg, 0_u64.to_be_bytes()]).unwrap();
+        let mut new_node_stmt = locked_db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)").unwrap();
+        for arg in args.seednode {
+            new_node_stmt.execute(params![arg, 0_u64.to_be_bytes()]).unwrap();
+        }
     }
 
     let pool = ThreadPool::new(args.threads);
     let queue = ArrayQueue::new(args.threads * 2);
     let arc_queue = Arc::new(queue);
 
-    let mut select_next_nodes = db_conn.prepare("SELECT * FROM nodes WHERE last_tried < ? ORDER BY last_tried").unwrap();
-    let mut update_last_tried = db_conn.prepare("UPDATE nodes SET last_tried = ? WHERE address = ?").unwrap();
     loop {
         let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
-        let node_iter = select_next_nodes.query_map([ten_min_ago], |r| {
-            Ok(NodeInfo {
-                addr_str: r.get(0)?,
-                last_tried: r.get(1)?,
-                last_seen: r.get(2)?,
-                user_agent: r.get(3)?,
-                services: u64::from_be_bytes(r.get(4)?),
-                starting_height: r.get(5)?,
-                protocol_version: r.get(6)?,
-            })
-        }).unwrap();
-        for node_r in node_iter {
-            let node = node_r.unwrap();
+        let mut nodes: Vec<NodeInfo> = vec![];
+        {
+            let locked_db_conn = db_conn.lock().unwrap();
+            let mut select_next_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE last_tried < ? ORDER BY last_tried").unwrap();
+            let node_iter = select_next_nodes.query_map([ten_min_ago], |r| {
+                Ok(NodeInfo {
+                    addr_str: r.get(0)?,
+                    last_tried: r.get(1)?,
+                    last_seen: r.get(2)?,
+                    user_agent: r.get(3)?,
+                    services: u64::from_be_bytes(r.get(4)?),
+                    starting_height: r.get(5)?,
+                    protocol_version: r.get(6)?,
+                })
+            }).unwrap();
+            for n in node_iter {
+                nodes.push(n.unwrap());
+            }
+        }
+        for node in nodes {
             while arc_queue.is_full() {
                 thread::sleep(time::Duration::from_secs(1));
             }
 
-            // Update last tried now to avoid getting these again next time around
-            let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
-            update_last_tried.execute(params![tried_timestamp, &node.addr_str]).unwrap();
-            update_last_tried.clear_bindings();
+            {
+                // Update last tried now to avoid getting these again next time around
+                let locked_db_conn = db_conn.lock().unwrap();
+                let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
+                locked_db_conn.execute("UPDATE nodes SET last_tried = ? WHERE address = ?", params![tried_timestamp, &node.addr_str]).unwrap();
+            }
 
             arc_queue.push(node).unwrap();
 
-            let db_file_c: String = db_file.clone();
+            let db_conn_c = db_conn.clone();
             let net_status_c: NetStatus = net_status.clone();
             let queue_c = arc_queue.clone();
             pool.execute(move || {
@@ -489,10 +501,9 @@ fn main() {
                     thread::sleep(time::Duration::from_secs(1));
                 }
                 let next_node = queue_c.pop().unwrap();
-                crawl_node(db_file_c, next_node, net_status_c);
+                crawl_node(db_conn_c, next_node, net_status_c);
             });
         }
-        select_next_nodes.clear_bindings();
         thread::sleep(time::Duration::from_secs(1));
     }
 }
