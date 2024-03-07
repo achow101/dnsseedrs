@@ -61,7 +61,7 @@ struct NodeAddress {
     port: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NodeInfo {
     addr_str: String,
     last_tried: u64,
@@ -70,6 +70,37 @@ struct NodeInfo {
     services: u64,
     starting_height: i32,
     protocol_version: u32,
+    try_count: i64,
+    reliability_2h: f64,
+    reliability_8h: f64,
+    reliability_1d: f64,
+    reliability_1w: f64,
+    reliability_1m: f64,
+}
+
+impl NodeInfo {
+    fn new(addr: String) -> NodeInfo {
+        return NodeInfo{
+            addr_str: addr,
+            last_tried: 0,
+            last_seen: 0,
+            user_agent: "".to_string(),
+            services: 0,
+            starting_height: 0,
+            protocol_version: 0,
+            try_count: 0,
+            reliability_2h: 0.0,
+            reliability_8h: 0.0,
+            reliability_1d: 0.0,
+            reliability_1w: 0.0,
+            reliability_1m: 0.0,
+        }
+    }
+}
+
+struct CrawlInfo {
+    node_info: NodeInfo,
+    age: u64,
 }
 
 #[derive(Clone)]
@@ -81,15 +112,10 @@ struct NetStatus {
     i2p_proxy: Option<String>,
 }
 
-struct NodeTry {
-    addr_str: String,
-    timestamp: u64,
-}
-
 enum CrawledNode {
-    Failed(NodeTry),
-    UpdatedInfo(NodeInfo),
-    NewNode(NodeInfo),
+    Failed(CrawlInfo),
+    UpdatedInfo(CrawlInfo),
+    NewNode(CrawlInfo),
 }
 
 fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
@@ -226,6 +252,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     println!("Crawling {}", &node.addr_str);
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
+    let age = tried_timestamp - node.last_tried;
 
     let node_addr = parse_address(&node.addr_str).unwrap();
     let sock_res = match node_addr.host {
@@ -267,7 +294,9 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
         _ => Err(std::io::Error::other("Net not available"))
     };
     if sock_res.is_err() {
-        send_channel.send(CrawledNode::Failed(NodeTry{addr_str: node.addr_str, timestamp: tried_timestamp})).unwrap();
+        let mut node_info = node.clone();
+        node_info.last_tried = tried_timestamp;
+        send_channel.send(CrawledNode::Failed(CrawlInfo{node_info: node_info, age: age})).unwrap();
         return ();
     }
     let sock = sock_res.unwrap();
@@ -308,6 +337,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     write_stream.flush().unwrap();
 
     // Receive loop
+    let mut success = false;
     loop {
         let msg = RawNetworkMessage::consensus_decode(&mut read_stream).unwrap();
         match msg.payload() {
@@ -318,37 +348,28 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                 // Send getaddr
                 RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr{}).consensus_encode(&mut write_stream).unwrap();
 
-
-                let new_info = NodeInfo{
-                    addr_str: node.addr_str.clone(),
-                    last_tried: tried_timestamp,
-                    last_seen: time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(),
-                    user_agent: ver.user_agent.clone(),
-                    services: ver.services.to_u64(),
-                    starting_height: ver.start_height,
-                    protocol_version: ver.version,
-                };
-                send_channel.send(CrawledNode::UpdatedInfo(new_info)).unwrap();
+                let mut new_info = node.clone();
+                new_info.last_tried = tried_timestamp;
+                new_info.last_seen = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
+                new_info.user_agent = ver.user_agent.clone();
+                new_info.services = ver.services.to_u64();
+                new_info.starting_height = ver.start_height;
+                new_info.protocol_version = ver.version;
+                send_channel.send(CrawledNode::UpdatedInfo(CrawlInfo{node_info: new_info, age: age})).unwrap();
             },
             NetworkMessage::Addr(addrs) => {
                 println!("Received addrv1 from {}", &node.addr_str);
                 for (_, a) in addrs {
                     match a.socket_addr() {
                         Ok(s) => {
-                            let new_info = NodeInfo{
-                                addr_str: s.to_string(),
-                                last_tried: 0,
-                                last_seen: 0,
-                                user_agent: "".to_string(),
-                                services: a.services.to_u64(),
-                                starting_height: 0,
-                                protocol_version: 0,
-                            };
-                            send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
+                            let mut new_info = NodeInfo::new(s.to_string());
+                            new_info.services = a.services.to_u64();
+                            send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
                         },
                         Err(..) => {},
                     };
                 }
+                success = true;
                 break
             },
             NetworkMessage::AddrV2(addrs) => {
@@ -384,20 +405,14 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                     };
                     match addrstr {
                         Ok(s) => {
-                            let new_info = NodeInfo{
-                                addr_str: s.to_string(),
-                                last_tried: 0,
-                                last_seen: 0,
-                                user_agent: "".to_string(),
-                                services: a.services.to_u64(),
-                                starting_height: 0,
-                                protocol_version: 0,
-                            };
-                            send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
+                            let mut new_info = NodeInfo::new(s.to_string());
+                            new_info.services = a.services.to_u64();
+                            send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
                         }
                         Err(e) => println!("Error: {}", e),
                     }
                 }
+                success = true;
                 break
             },
             NetworkMessage::Ping(ping) => {
@@ -409,6 +424,18 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     }
 
     sock.shutdown(Shutdown::Both).unwrap();
+
+    if !success {
+        let mut node_info = node.clone();
+        node_info.last_tried = tried_timestamp;
+        send_channel.send(CrawledNode::Failed(CrawlInfo{node_info: node_info, age: age})).unwrap();
+    }
+}
+
+fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64) -> f64 {
+    let alpha = 1.0 - (-1.0 * age as f64 / window as f64).exp(); // 1 - e^(-delta T / tau)
+    let x = if good { 1.0 } else { 0.0 };
+    return (alpha * x) + ((1.0 - alpha) * old_reliability); // alpha * x + (1 - alpha) * s_{t-1}
 }
 
 fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net_status: NetStatus) {
@@ -436,31 +463,69 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
             }
             match crawled {
                 CrawledNode::Failed(info) => {
-                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.timestamp, false]).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                    locked_db_conn.execute("
+                        UPDATE nodes SET
+                            last_tried = ?,
+                            try_count = ?,
+                            reliability_2h = ?,
+                            reliability_8h = ?,
+                            reliability_1d = ?,
+                            reliability_1w = ?,
+                            reliability_1m = ?
+                        WHERE address = ?",
+                        params![
+                            info.node_info.last_tried,
+                            info.node_info.try_count + 1,
+                            calculate_reliability(false, info.node_info.reliability_2h, info.age, 3600 * 2),
+                            calculate_reliability(false, info.node_info.reliability_8h, info.age, 3600 * 8),
+                            calculate_reliability(false, info.node_info.reliability_1d, info.age, 3600 * 24),
+                            calculate_reliability(false, info.node_info.reliability_1w, info.age, 3600 * 24 * 7),
+                            calculate_reliability(false, info.node_info.reliability_1m, info.age, 3600 * 24 * 30),
+                            info.node_info.addr_str,
+                        ]
+                    ).unwrap();
+                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr_str);
                 },
                 CrawledNode::UpdatedInfo(info) => {
                     locked_db_conn.execute(
-                        "UPDATE nodes SET last_tried = ?, last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
+                        "UPDATE nodes SET
+                            last_tried = ?,
+                            last_seen = ?,
+                            user_agent = ?,
+                            services = ?,
+                            starting_height = ?,
+                            protocol_version = ?,
+                            try_count = ?,
+                            reliability_2h = ?,
+                            reliability_8h = ?,
+                            reliability_1d = ?,
+                            reliability_1w = ?,
+                            reliability_1m = ?
+                        WHERE address = ?",
                         params![
-                            info.last_tried,
-                            info.last_seen,
-                            info.user_agent,
-                            info.services.to_be_bytes(),
-                            info.starting_height,
-                            info.protocol_version,
-                            info.addr_str,
+                            info.node_info.last_tried,
+                            info.node_info.last_seen,
+                            info.node_info.user_agent,
+                            info.node_info.services.to_be_bytes(),
+                            info.node_info.starting_height,
+                            info.node_info.protocol_version,
+                            info.node_info.try_count + 1,
+                            calculate_reliability(true, info.node_info.reliability_2h, info.age, 3600 * 2),
+                            calculate_reliability(true, info.node_info.reliability_8h, info.age, 3600 * 8),
+                            calculate_reliability(true, info.node_info.reliability_1d, info.age, 3600 * 24),
+                            calculate_reliability(true, info.node_info.reliability_1w, info.age, 3600 * 24 * 7),
+                            calculate_reliability(true, info.node_info.reliability_1m, info.age, 3600 * 24 * 30),
+                            info.node_info.addr_str,
                         ]
                     ).unwrap();
-                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.last_tried, true]).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr_str);
                 },
                 CrawledNode::NewNode(info) => {
                     locked_db_conn.execute(
-                        "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
-                        params![&info.addr_str, info.services.to_be_bytes()]
+                        "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)",
+                        params![&info.node_info.addr_str, info.node_info.services.to_be_bytes()]
                     ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr_str);
                 },
             }
             i += 1;
@@ -487,6 +552,12 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
                     services: u64::from_be_bytes(r.get(4)?),
                     starting_height: r.get(5)?,
                     protocol_version: r.get(6)?,
+                    try_count: r.get(7)?,
+                    reliability_2h: r.get(8)?,
+                    reliability_8h: r.get(9)?,
+                    reliability_1d: r.get(10)?,
+                    reliability_1w: r.get(11)?,
+                    reliability_1m: r.get(12)?,
                 })
             }).unwrap();
             for n in node_iter {
@@ -590,21 +661,18 @@ fn main() {
                 user_agent TEXT NOT NULL,
                 services BLOB NOT NULL,
                 starting_height INTEGER NOT NULL,
-                protocol_version INTEGER NOT NULL
-            )",
-            []
-        ).unwrap();
-        locked_db_conn.execute(
-            "CREATE TABLE if NOT EXISTS 'tried_log' (
-                address TEXT,
-                timestamp INTEGER NOT NULL,
-                online BOOL NOT NULL,
-                FOREIGN KEY(address) REFERENCES nodes(address)
+                protocol_version INTEGER NOT NULL,
+                try_count INTEGER NOT NULL,
+                reliability_2h REAL NOT NULL,
+                reliability_8h REAL NOT NULL,
+                reliability_1d REAL NOT NULL,
+                reliability_1w REAL NOT NULL,
+                reliability_1m REAL NOT NULL
             )",
             []
         ).unwrap();
 
-        let mut new_node_stmt = locked_db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)").unwrap();
+        let mut new_node_stmt = locked_db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)").unwrap();
         for arg in args.seednode {
             new_node_stmt.execute(params![arg, 0_u64.to_be_bytes()]).unwrap();
         }
