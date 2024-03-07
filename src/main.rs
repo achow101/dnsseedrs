@@ -411,6 +411,122 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     sock.shutdown(Shutdown::Both).unwrap();
 }
 
+fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net_status: NetStatus) {
+    // Setup thread pool with one less than specified to account for this thread.
+    let pool = ThreadPool::new(threads - 1);
+
+    // Shared between fetcher and finisher thread
+    let nodes_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    // Finisher thread to receive newly found addrs and update node info and try
+    let (tx, rx) = sync_channel::<CrawledNode>(threads * 1000 * 2);
+    let f_db_conn = db_conn.clone();
+    let f_nin_flight = nodes_in_flight.clone();
+    pool.execute(move || {
+        let mut i = 0;
+        loop {
+            let crawled = rx.recv().unwrap();
+            let locked_db_conn = f_db_conn.lock().unwrap();
+            if i == 0 {
+                locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
+            }
+            if i == 500 {
+                locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
+                i = -1;
+            }
+            match crawled {
+                CrawledNode::Failed(info) => {
+                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.timestamp, false]).unwrap();
+                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                },
+                CrawledNode::UpdatedInfo(info) => {
+                    locked_db_conn.execute(
+                        "UPDATE nodes SET last_tried = ?, last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
+                        params![
+                            info.last_tried,
+                            info.last_seen,
+                            info.user_agent,
+                            info.services.to_be_bytes(),
+                            info.starting_height,
+                            info.protocol_version,
+                            info.addr_str,
+                        ]
+                    ).unwrap();
+                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.last_tried, true]).unwrap();
+                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                },
+                CrawledNode::NewNode(info) => {
+                    locked_db_conn.execute(
+                        "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
+                        params![&info.addr_str, info.services.to_be_bytes()]
+                    ).unwrap();
+                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                },
+            }
+            i += 1;
+        }
+    });
+
+    // Queue to send nodes to crawl to the crawler threads
+    let queue = ArrayQueue::new(threads * 2);
+    let arc_queue = Arc::new(queue);
+
+    // Work fetcher loop
+    loop {
+        let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
+        let mut nodes: Vec<NodeInfo> = vec![];
+        {
+            let locked_db_conn = db_conn.lock().unwrap();
+            let mut select_next_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE last_tried < ? ORDER BY last_tried").unwrap();
+            let node_iter = select_next_nodes.query_map([ten_min_ago], |r| {
+                Ok(NodeInfo {
+                    addr_str: r.get(0)?,
+                    last_tried: r.get(1)?,
+                    last_seen: r.get(2)?,
+                    user_agent: r.get(3)?,
+                    services: u64::from_be_bytes(r.get(4)?),
+                    starting_height: r.get(5)?,
+                    protocol_version: r.get(6)?,
+                })
+            }).unwrap();
+            for n in node_iter {
+                nodes.push(n.unwrap());
+            }
+        }
+        for node in nodes {
+            while arc_queue.is_full() {
+                thread::sleep(time::Duration::from_secs(1));
+            }
+
+            {
+                let mut l_nodes_in_flight = nodes_in_flight.lock().unwrap();
+                if l_nodes_in_flight.get(&node.addr_str).is_some() {
+                    continue;
+                }
+                l_nodes_in_flight.insert(node.addr_str.clone());
+            }
+
+            arc_queue.push(node).unwrap();
+
+            if pool.active_count() < pool.max_count() {
+                let net_status_c: NetStatus = net_status.clone();
+                let queue_c = arc_queue.clone();
+                let tx_c = tx.clone();
+                pool.execute(move || {
+                    loop {
+                        while queue_c.is_empty() {
+                            thread::sleep(time::Duration::from_secs(1));
+                        }
+                        let next_node = queue_c.pop().unwrap();
+                        crawl_node(tx_c.clone(), next_node, net_status_c.clone());
+                    }
+                });
+            }
+        }
+        thread::sleep(time::Duration::from_secs(1));
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -494,117 +610,13 @@ fn main() {
         }
     }
 
-    // Setup thread pool with one less than specified to account for this thread.
-    let pool = ThreadPool::new(args.threads - 1);
-
-    // Shared between fetcher and finisher thread
-    let nodes_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-
-    // Finisher thread to receive newly found addrs and update node info and try
-    let (tx, rx) = sync_channel::<CrawledNode>(args.threads * 1000 * 2);
-    let f_db_conn = db_conn.clone();
-    let f_nin_flight = nodes_in_flight.clone();
-    pool.execute(move || {
-        let mut i = 0;
-        loop {
-            let crawled = rx.recv().unwrap();
-            let locked_db_conn = f_db_conn.lock().unwrap();
-            if i == 0 {
-                locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            }
-            if i == 500 {
-                locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
-                i = -1;
-            }
-            match crawled {
-                CrawledNode::Failed(info) => {
-                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.timestamp, false]).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
-                },
-                CrawledNode::UpdatedInfo(info) => {
-                    locked_db_conn.execute(
-                        "UPDATE nodes SET last_tried = ?, last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
-                        params![
-                            info.last_tried,
-                            info.last_seen,
-                            info.user_agent,
-                            info.services.to_be_bytes(),
-                            info.starting_height,
-                            info.protocol_version,
-                            info.addr_str,
-                        ]
-                    ).unwrap();
-                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.last_tried, true]).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
-                },
-                CrawledNode::NewNode(info) => {
-                    locked_db_conn.execute(
-                        "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
-                        params![&info.addr_str, info.services.to_be_bytes()]
-                    ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
-                },
-            }
-            i += 1;
-        }
+    // Start crawler threads
+    let db_conn_c = db_conn.clone();
+    let net_status_c: NetStatus = net_status.clone();
+    let t_crawl = thread::spawn(move || {
+        crawler_thread(db_conn_c, args.threads - 3, net_status_c);
     });
 
-    // Queue to send nodes to crawl to the crawler threads
-    let queue = ArrayQueue::new(args.threads * 2);
-    let arc_queue = Arc::new(queue);
-
-    // Work fetcher loop
-    loop {
-        let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
-        let mut nodes: Vec<NodeInfo> = vec![];
-        {
-            let locked_db_conn = db_conn.lock().unwrap();
-            let mut select_next_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE last_tried < ? ORDER BY last_tried").unwrap();
-            let node_iter = select_next_nodes.query_map([ten_min_ago], |r| {
-                Ok(NodeInfo {
-                    addr_str: r.get(0)?,
-                    last_tried: r.get(1)?,
-                    last_seen: r.get(2)?,
-                    user_agent: r.get(3)?,
-                    services: u64::from_be_bytes(r.get(4)?),
-                    starting_height: r.get(5)?,
-                    protocol_version: r.get(6)?,
-                })
-            }).unwrap();
-            for n in node_iter {
-                nodes.push(n.unwrap());
-            }
-        }
-        for node in nodes {
-            while arc_queue.is_full() {
-                thread::sleep(time::Duration::from_secs(1));
-            }
-
-            {
-                let mut l_nodes_in_flight = nodes_in_flight.lock().unwrap();
-                if l_nodes_in_flight.get(&node.addr_str).is_some() {
-                    continue;
-                }
-                l_nodes_in_flight.insert(node.addr_str.clone());
-            }
-
-            arc_queue.push(node).unwrap();
-
-            if pool.active_count() < pool.max_count() {
-                let net_status_c: NetStatus = net_status.clone();
-                let queue_c = arc_queue.clone();
-                let tx_c = tx.clone();
-                pool.execute(move || {
-                    loop {
-                        while queue_c.is_empty() {
-                            thread::sleep(time::Duration::from_secs(1));
-                        }
-                        let next_node = queue_c.pop().unwrap();
-                        crawl_node(tx_c.clone(), next_node, net_status_c.clone());
-                    }
-                });
-            }
-        }
-        thread::sleep(time::Duration::from_secs(1));
-    }
+    // Join all threads
+    t_crawl.join().unwrap();
 }
