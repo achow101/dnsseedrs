@@ -1,5 +1,3 @@
-#![feature(ip)]
-
 use base32ct::{Base32Unpadded, Encoding};
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::p2p::address::{Address, AddrV2};
@@ -86,20 +84,39 @@ fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
     if addr_parse_res.is_ok() {
         let parsed_addr = addr_parse_res.unwrap();
         let ip = parsed_addr.ip().to_canonical();
-        if ip.is_ipv4() {
-            if !ip.is_global() {
+        if let IpAddr::V4(ip4) = ip {
+            // Similar to is_global(), but not unstable only feature
+            if ip4.octets()[0] == 0
+                || ip4.is_private()
+                || ip4.is_loopback()
+                || ip4.is_link_local()
+                || (ip4.octets()[0] == 192 && ip4.octets()[1] == 0 && ip4.octets()[2] ==0)
+                || ip4.is_documentation()
+                || ip4.is_broadcast()
+            {
                 return Err("IPv4 addresses must be globally accessible");
             }
-            if let IpAddr::V4(ip4) = ip {
-                return Ok(NodeAddress {
-                    host: Host::Ipv4(ip4),
-                    port: parsed_addr.port(),
-                });
-            }
+            return Ok(NodeAddress {
+                host: Host::Ipv4(ip4),
+                port: parsed_addr.port(),
+            });
         }
         assert!(ip.is_ipv6());
         if let IpAddr::V6(ip6) = ip {
-            if !ip6.is_global() {
+            // Similar to is_global(), but not unstable only feature
+            if ip6.is_unspecified()
+                || matches!(ip6.segments(), [0, 0, 0, 0, 0, 0xffff, _, _])
+                || matches!(ip6.segments(), [0x64, 0xff9b, 1, _, _, _, _, _])
+                || matches!(ip6.segments(), [0x100, 0, 0, 0, _, _, _, _])
+                || (matches!(ip6.segments(), [0x2001, b, _, _, _, _, _, _] if b < 0x200)
+                    && !(
+                        u128::from_be_bytes(ip6.octets()) == 0x2001_0001_0000_0000_0000_0000_0000_0001
+                        || u128::from_be_bytes(ip6.octets()) == 0x2001_0001_0000_0000_0000_0000_0000_0002
+                        || matches!(ip6.segments(), [0x2001, 3, _, _, _, _, _, _])
+                        || matches!(ip6.segments(), [0x2001, 4, 0x112, _, _, _, _, _])
+                        || matches!(ip6.segments(), [0x2001, b, _, _, _, _, _, _] if b >= 0x20 && b <= 0x2F)
+                    ))
+            {
                 // Check for CJDNS in fc00::/8
                 if matches!(ip6.octets(), [0xfc, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _]) {
                     return Ok(NodeAddress {
