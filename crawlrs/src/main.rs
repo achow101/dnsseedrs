@@ -217,17 +217,27 @@ fn crawl_node(db_conn: Arc<Mutex<rusqlite::Connection>>, node: NodeInfo, net_sta
             let proxy_addr = net_status.onion_proxy.as_ref().unwrap();
             let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
             if stream.is_ok() {
-                socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port).unwrap();
+                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port);
+                match cr {
+                    Ok(..) => stream,
+                    Err(e) => Err(std::io::Error::other(e)),
+                }
+            } else {
+                stream
             }
-            stream
         },
         Host::I2P(ref host) if net_status.i2p_proxy.is_some() => {
             let proxy_addr = net_status.i2p_proxy.as_ref().unwrap();
             let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
             if stream.is_err() {
-                socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port).unwrap();
+                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port);
+                match cr {
+                    Ok(..) => stream,
+                    Err(e) => Err(std::io::Error::other(e)),
+                }
+            } else {
+                stream
             }
-            stream
         },
         _ => Err(std::io::Error::other("Net not available"))
     };
