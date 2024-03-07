@@ -9,6 +9,7 @@ use crossbeam::queue::ArrayQueue;
 use clap::Parser;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashSet;
+use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
@@ -26,8 +27,11 @@ struct Args {
     #[arg(short, long)]
     seednode: Vec<String>,
 
-    #[arg(short, long)]
+    #[arg(long)]
     db_file: Option<String>,
+
+    #[arg(long)]
+    dump_file: Option<String>,
 
     #[arg(long, default_value_t = true)]
     ipv4_reachable: bool,
@@ -560,9 +564,7 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
                     reliability_1m: r.get(12)?,
                 })
             }).unwrap();
-            for n in node_iter {
-                nodes.push(n.unwrap());
-            }
+            nodes = node_iter.map(|n| n.unwrap()).collect();
         }
         for node in nodes {
             while arc_queue.is_full() {
@@ -595,6 +597,75 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
             }
         }
         thread::sleep(time::Duration::from_secs(1));
+    }
+}
+
+fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) {
+    let mut count = 0;
+    loop {
+        // Sleep for 100s, then 200s, 400s, 800s, 1600s, and then 3200s forever
+        thread::sleep(time::Duration::from_secs(100 << count));
+        if count < 5 {
+            count += 1;
+        }
+
+        let mut nodes: Vec<NodeInfo> = vec![];
+        {
+            let locked_db_conn = db_conn.lock().unwrap();
+            let mut select_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE try_count > 0").unwrap();
+            let node_iter = select_nodes.query_map([], |r| {
+                Ok(NodeInfo {
+                    addr_str: r.get(0)?,
+                    last_tried: r.get(1)?,
+                    last_seen: r.get(2)?,
+                    user_agent: r.get(3)?,
+                    services: u64::from_be_bytes(r.get(4)?),
+                    starting_height: r.get(5)?,
+                    protocol_version: r.get(6)?,
+                    try_count: r.get(7)?,
+                    reliability_2h: r.get(8)?,
+                    reliability_8h: r.get(9)?,
+                    reliability_1d: r.get(10)?,
+                    reliability_1w: r.get(11)?,
+                    reliability_1m: r.get(12)?,
+                })
+            }).unwrap();
+            nodes = node_iter.map(|n| n.unwrap()).collect();
+        }
+
+        let mut f = File::create(dump_file).unwrap();
+        write!(f,
+            "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}{}\n",
+            "address",
+            "good",
+            "last_seen",
+            "%(2h)",
+            "%(8h)",
+            "%(1d)",
+            "%(1w)",
+            "%(1m)",
+            "blocks",
+            "services",
+            "version",
+            "user_agent"
+        ).unwrap();
+        for node in nodes {
+            write!(f,
+                "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}\n",
+                node.addr_str,
+                1,
+                node.last_seen,
+                node.reliability_2h,
+                node.reliability_8h,
+                node.reliability_1d,
+                node.reliability_1w,
+                node.reliability_1m,
+                node.starting_height,
+                node.services,
+                node.protocol_version,
+                node.user_agent,
+            ).unwrap();
+        }
     }
 }
 
@@ -685,6 +756,14 @@ fn main() {
         crawler_thread(db_conn_c, args.threads - 3, net_status_c);
     });
 
+    // Start dumper thread
+    let dump_file = args.dump_file.unwrap_or("seeds.txt".to_string());
+    let db_conn_c2 = db_conn.clone();
+    let t_dump = thread::spawn(move || {
+        dumper_thread(db_conn_c2, &dump_file);
+    });
+
     // Join all threads
+    t_dump.join().unwrap();
     t_crawl.join().unwrap();
 }
