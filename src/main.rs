@@ -345,7 +345,6 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                                 protocol_version: 0,
                             };
                             send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
-                            println!("Got addrv1 from {}", s.to_string());
                         },
                         Err(..) => {},
                     };
@@ -395,7 +394,6 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                                 protocol_version: 0,
                             };
                             send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
-                            println!("Got addrv2 from {}", s.to_string());
                         }
                         Err(e) => println!("Error: {}", e),
                     }
