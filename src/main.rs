@@ -345,7 +345,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                                 protocol_version: 0,
                             };
                             send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
-                            println!("Got addrv1 {} with service flags {}", s.to_string(), a.services);
+                            println!("Got addrv1 from {}", s.to_string());
                         },
                         Err(..) => {},
                     };
@@ -395,6 +395,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                                 protocol_version: 0,
                             };
                             send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
+                            println!("Got addrv2 from {}", s.to_string());
                         }
                         Err(e) => println!("Error: {}", e),
                     }
@@ -506,9 +507,17 @@ fn main() {
     let f_db_conn = db_conn.clone();
     let f_nin_flight = nodes_in_flight.clone();
     pool.execute(move || {
+        let mut i = 0;
         loop {
             let crawled = rx.recv().unwrap();
             let locked_db_conn = f_db_conn.lock().unwrap();
+            if i == 0 {
+                locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
+            }
+            if i == 500 {
+                locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
+                i = -1;
+            }
             match crawled {
                 CrawledNode::Failed(info) => {
                     locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.timestamp, false]).unwrap();
@@ -516,8 +525,9 @@ fn main() {
                 },
                 CrawledNode::UpdatedInfo(info) => {
                     locked_db_conn.execute(
-                        "UPDATE nodes SET last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
+                        "UPDATE nodes SET last_tried = ?, last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
                         params![
+                            info.last_tried,
                             info.last_seen,
                             info.user_agent,
                             info.services.to_be_bytes(),
@@ -537,6 +547,7 @@ fn main() {
                     f_nin_flight.lock().unwrap().remove(&info.addr_str);
                 },
             }
+            i += 1;
         }
     });
 
