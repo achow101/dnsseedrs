@@ -309,7 +309,7 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                     new_node_stmt.clear_bindings();
                     match a.socket_addr() {
                         Ok(s) => {
-                            new_node_stmt.execute([s.to_string(), a.services.to_u64().to_string()]).unwrap();
+                            new_node_stmt.execute(params![s.to_string(), a.services.to_u64()]).unwrap();
                             println!("Got addrv1 {} with service flags {}", s.to_string(), a.services);
                         },
                         Err(..) => {},
@@ -351,7 +351,7 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                     };
                     match addrstr {
                         Ok(a_s) => {
-                            new_node_stmt.execute([&a_s, &a.services.to_u64()]).unwrap();
+                            new_node_stmt.execute(params![&a_s, &a.services.to_u64()]).unwrap();
                         }
                         Err(e) => println!("Error: {}", e),
                     }
