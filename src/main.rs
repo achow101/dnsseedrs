@@ -8,6 +8,7 @@ use bitcoin::p2p::ServiceFlags;
 use crossbeam::queue::ArrayQueue;
 use clap::Parser;
 use sha3::{Digest, Sha3_256};
+use std::collections::HashSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
@@ -485,6 +486,8 @@ fn main() {
     let queue = ArrayQueue::new(args.threads * 2);
     let arc_queue = Arc::new(queue);
 
+    // Work fetcher loop
+    let mut nodes_in_flight: HashSet<String> = HashSet::new();
     loop {
         let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
         let mut nodes: Vec<NodeInfo> = vec![];
@@ -507,16 +510,14 @@ fn main() {
             }
         }
         for node in nodes {
+            if nodes_in_flight.get(&node.addr_str).is_some() {
+                continue;
+            }
             while arc_queue.is_full() {
                 thread::sleep(time::Duration::from_secs(1));
             }
 
-            {
-                // Update last tried now to avoid getting these again next time around
-                let locked_db_conn = db_conn.lock().unwrap();
-                let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
-                locked_db_conn.execute("UPDATE nodes SET last_tried = ? WHERE address = ?", params![tried_timestamp, &node.addr_str]).unwrap();
-            }
+            nodes_in_flight.insert(node.addr_str.clone());
 
             arc_queue.push(node).unwrap();
 
