@@ -13,6 +13,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::time;
 use std::thread;
 use threadpool::ThreadPool;
@@ -43,7 +44,7 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:4447")]
     i2p_proxy: String,
 
-    #[arg(short, long, default_value_t = 20)]
+    #[arg(short, long, default_value_t = 24)]
     threads: usize,
 }
 
@@ -68,7 +69,7 @@ struct NodeInfo {
     user_agent: String,
     services: u64,
     starting_height: i32,
-    protocol_version: i32,
+    protocol_version: u32,
 }
 
 #[derive(Clone)]
@@ -78,6 +79,17 @@ struct NetStatus {
     cjdns: bool,
     onion_proxy: Option<String>,
     i2p_proxy: Option<String>,
+}
+
+struct NodeTry {
+    addr_str: String,
+    timestamp: u64,
+}
+
+enum CrawledNode {
+    Failed(NodeTry),
+    UpdatedInfo(NodeInfo),
+    NewNode(NodeInfo),
 }
 
 fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
@@ -210,15 +222,10 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
     return Ok(());
 }
 
-fn crawl_node(db_conn: Arc<Mutex<rusqlite::Connection>>, node: NodeInfo, net_status: NetStatus) {
+fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status: NetStatus) {
     println!("Crawling {}", &node.addr_str);
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
-    {
-        // Update last tried now to avoid getting these again next time around
-        let locked_db_conn = db_conn.lock().unwrap();
-        locked_db_conn.execute("UPDATE nodes SET last_tried = ? WHERE address = ?", params![tried_timestamp, &node.addr_str]).unwrap();
-    }
 
     let node_addr = parse_address(&node.addr_str).unwrap();
     let sock_res = match node_addr.host {
@@ -260,8 +267,7 @@ fn crawl_node(db_conn: Arc<Mutex<rusqlite::Connection>>, node: NodeInfo, net_sta
         _ => Err(std::io::Error::other("Net not available"))
     };
     if sock_res.is_err() {
-        let locked_db_conn = db_conn.lock().unwrap();
-        locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![node.addr_str, tried_timestamp, false]).unwrap();
+        send_channel.send(CrawledNode::Failed(NodeTry{addr_str: node.addr_str, timestamp: tried_timestamp})).unwrap();
         return ();
     }
     let sock = sock_res.unwrap();
@@ -312,31 +318,33 @@ fn crawl_node(db_conn: Arc<Mutex<rusqlite::Connection>>, node: NodeInfo, net_sta
                 // Send getaddr
                 RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr{}).consensus_encode(&mut write_stream).unwrap();
 
-                let locked_db_conn = db_conn.lock().unwrap();
-                locked_db_conn.execute(
-                    "UPDATE nodes SET last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
-                    params![
-                        time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(),
-                        ver.user_agent,
-                        ver.services.to_u64().to_be_bytes(),
-                        ver.start_height,
-                        ver.version,
-                        node.addr_str,
-                    ]
-                ).unwrap();
-                locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![node.addr_str, tried_timestamp, true]).unwrap();
-                println!("Success {}", &node.addr_str);
+
+                let new_info = NodeInfo{
+                    addr_str: node.addr_str.clone(),
+                    last_tried: tried_timestamp,
+                    last_seen: time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(),
+                    user_agent: ver.user_agent.clone(),
+                    services: ver.services.to_u64(),
+                    starting_height: ver.start_height,
+                    protocol_version: ver.version,
+                };
+                send_channel.send(CrawledNode::UpdatedInfo(new_info)).unwrap();
             },
             NetworkMessage::Addr(addrs) => {
                 println!("Received addrv1 from {}", &node.addr_str);
                 for (_, a) in addrs {
                     match a.socket_addr() {
                         Ok(s) => {
-                            let locked_db_conn = db_conn.lock().unwrap();
-                            locked_db_conn.execute(
-                                "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
-                                params![s.to_string(), a.services.to_u64().to_be_bytes()]
-                            ).unwrap();
+                            let new_info = NodeInfo{
+                                addr_str: s.to_string(),
+                                last_tried: 0,
+                                last_seen: 0,
+                                user_agent: "".to_string(),
+                                services: a.services.to_u64(),
+                                starting_height: 0,
+                                protocol_version: 0,
+                            };
+                            send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
                             println!("Got addrv1 {} with service flags {}", s.to_string(), a.services);
                         },
                         Err(..) => {},
@@ -377,11 +385,16 @@ fn crawl_node(db_conn: Arc<Mutex<rusqlite::Connection>>, node: NodeInfo, net_sta
                     };
                     match addrstr {
                         Ok(s) => {
-                            let locked_db_conn = db_conn.lock().unwrap();
-                            locked_db_conn.execute(
-                                "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
-                                params![s.to_string(), a.services.to_u64().to_be_bytes()]
-                            ).unwrap();
+                            let new_info = NodeInfo{
+                                addr_str: s.to_string(),
+                                last_tried: 0,
+                                last_seen: 0,
+                                user_agent: "".to_string(),
+                                services: a.services.to_u64(),
+                                starting_height: 0,
+                                protocol_version: 0,
+                            };
+                            send_channel.send(CrawledNode::NewNode(new_info)).unwrap();
                         }
                         Err(e) => println!("Error: {}", e),
                     }
@@ -482,12 +495,56 @@ fn main() {
         }
     }
 
-    let pool = ThreadPool::new(args.threads);
+    // Setup thread pool with one less than specified to account for this thread.
+    let pool = ThreadPool::new(args.threads - 1);
+
+    // Shared between fetcher and finisher thread
+    let nodes_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    // Finisher thread to receive newly found addrs and update node info and try
+    let (tx, rx) = sync_channel::<CrawledNode>(args.threads * 1000 * 2);
+    let f_db_conn = db_conn.clone();
+    let f_nin_flight = nodes_in_flight.clone();
+    pool.execute(move || {
+        loop {
+            let crawled = rx.recv().unwrap();
+            let locked_db_conn = f_db_conn.lock().unwrap();
+            match crawled {
+                CrawledNode::Failed(info) => {
+                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.timestamp, false]).unwrap();
+                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                },
+                CrawledNode::UpdatedInfo(info) => {
+                    locked_db_conn.execute(
+                        "UPDATE nodes SET last_seen = ?, user_agent = ?, services = ?, starting_height = ?, protocol_version = ? WHERE address = ?",
+                        params![
+                            info.last_seen,
+                            info.user_agent,
+                            info.services.to_be_bytes(),
+                            info.starting_height,
+                            info.protocol_version,
+                            info.addr_str,
+                        ]
+                    ).unwrap();
+                    locked_db_conn.execute("INSERT INTO tried_log VALUES(?, ?, ?)", params![&info.addr_str, info.last_tried, true]).unwrap();
+                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                },
+                CrawledNode::NewNode(info) => {
+                    locked_db_conn.execute(
+                        "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)",
+                        params![&info.addr_str, info.services.to_be_bytes()]
+                    ).unwrap();
+                    f_nin_flight.lock().unwrap().remove(&info.addr_str);
+                },
+            }
+        }
+    });
+
+    // Queue to send nodes to crawl to the crawler threads
     let queue = ArrayQueue::new(args.threads * 2);
     let arc_queue = Arc::new(queue);
 
     // Work fetcher loop
-    let mut nodes_in_flight: HashSet<String> = HashSet::new();
     loop {
         let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
         let mut nodes: Vec<NodeInfo> = vec![];
@@ -510,27 +567,34 @@ fn main() {
             }
         }
         for node in nodes {
-            if nodes_in_flight.get(&node.addr_str).is_some() {
-                continue;
-            }
             while arc_queue.is_full() {
                 thread::sleep(time::Duration::from_secs(1));
             }
 
-            nodes_in_flight.insert(node.addr_str.clone());
+            {
+                let mut l_nodes_in_flight = nodes_in_flight.lock().unwrap();
+                if l_nodes_in_flight.get(&node.addr_str).is_some() {
+                    continue;
+                }
+                l_nodes_in_flight.insert(node.addr_str.clone());
+            }
 
             arc_queue.push(node).unwrap();
 
-            let db_conn_c = db_conn.clone();
-            let net_status_c: NetStatus = net_status.clone();
-            let queue_c = arc_queue.clone();
-            pool.execute(move || {
-                while queue_c.is_empty() {
-                    thread::sleep(time::Duration::from_secs(1));
-                }
-                let next_node = queue_c.pop().unwrap();
-                crawl_node(db_conn_c, next_node, net_status_c);
-            });
+            if pool.active_count() < pool.max_count() {
+                let net_status_c: NetStatus = net_status.clone();
+                let queue_c = arc_queue.clone();
+                let tx_c = tx.clone();
+                pool.execute(move || {
+                    loop {
+                        while queue_c.is_empty() {
+                            thread::sleep(time::Duration::from_secs(1));
+                        }
+                        let next_node = queue_c.pop().unwrap();
+                        crawl_node(tx_c.clone(), next_node, net_status_c.clone());
+                    }
+                });
+            }
         }
         thread::sleep(time::Duration::from_secs(1));
     }
