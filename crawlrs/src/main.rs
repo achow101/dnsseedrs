@@ -59,14 +59,15 @@ struct NodeAddress {
     port: u16,
 }
 
+#[derive(Debug)]
 struct NodeInfo {
     addr_str: String,
     last_tried: u64,
     last_seen: u64,
     user_agent: String,
-    services: u32,
-    starting_height: u32,
-    protocol_version: u32,
+    services: u64,
+    starting_height: i32,
+    protocol_version: i32,
 }
 
 #[derive(Clone)]
@@ -344,7 +345,7 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                     };
                     match addrstr {
                         Ok(a_s) => {
-                            new_node_stmt.execute([&a_s, &a.services.to_u64().to_string()]).unwrap();
+                            new_node_stmt.execute([&a_s, &a.services.to_u64()]).unwrap();
                         }
                         Err(e) => println!("Error: {}", e),
                     }
