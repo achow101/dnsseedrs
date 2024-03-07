@@ -442,6 +442,40 @@ fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64
     return (alpha * x) + ((1.0 - alpha) * old_reliability); // alpha * x + (1 - alpha) * s_{t-1}
 }
 
+fn is_good(node: &NodeInfo) -> bool {
+    let node_addr = parse_address(&node.addr_str).unwrap();
+    if node_addr.port != 8333 {
+        return false;
+    }
+    if !ServiceFlags::from(node.services).has(ServiceFlags::NETWORK) {
+        return false;
+    }
+    if node.protocol_version < 70001 {
+        return false;
+    }
+    if node.starting_height < 350000 {
+        return false;
+    }
+
+    if node.reliability_2h > 0.85 && node.try_count > 2 {
+        return true;
+    }
+    if node.reliability_8h > 0.70 && node.try_count > 4 {
+        return true;
+    }
+    if node.reliability_1d > 0.55 && node.try_count > 8 {
+        return true;
+    }
+    if node.reliability_1w > 0.45 && node.try_count > 16 {
+        return true;
+    }
+    if node.reliability_1m > 0.35 && node.try_count > 32 {
+        return true;
+    }
+
+    return false;
+}
+
 fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net_status: NetStatus) {
     // Setup thread pool with one less than specified to account for this thread.
     let pool = ThreadPool::new(threads - 1);
@@ -653,7 +687,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) 
             write!(f,
                 "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}\n",
                 node.addr_str,
-                1,
+                i32::from(is_good(&node)),
                 node.last_seen,
                 node.reliability_2h,
                 node.reliability_8h,
