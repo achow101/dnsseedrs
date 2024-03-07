@@ -197,7 +197,7 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
     db_conn.busy_handler(Some(|_| {
         thread::sleep(time::Duration::from_secs(1));
         return true;
-    }));
+    })).unwrap();
     println!("Crawling {}", &node.addr_str);
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
@@ -294,7 +294,7 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                 update_last_seen.execute(params![
                     time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs(),
                     ver.user_agent,
-                    ver.services.to_u64(),
+                    ver.services.to_u64().to_be_bytes(),
                     ver.start_height,
                     ver.version,
                     node.addr_str,
@@ -309,7 +309,7 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                     new_node_stmt.clear_bindings();
                     match a.socket_addr() {
                         Ok(s) => {
-                            new_node_stmt.execute(params![s.to_string(), a.services.to_u64()]).unwrap();
+                            new_node_stmt.execute(params![s.to_string(), a.services.to_u64().to_be_bytes()]).unwrap();
                             println!("Got addrv1 {} with service flags {}", s.to_string(), a.services);
                         },
                         Err(..) => {},
@@ -351,7 +351,7 @@ fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
                     };
                     match addrstr {
                         Ok(a_s) => {
-                            new_node_stmt.execute(params![&a_s, &a.services.to_u64()]).unwrap();
+                            new_node_stmt.execute(params![&a_s, &a.services.to_u64().to_be_bytes()]).unwrap();
                         }
                         Err(e) => println!("Error: {}", e),
                     }
@@ -421,14 +421,14 @@ fn main() {
     db_conn.busy_handler(Some(|_| {
         thread::sleep(time::Duration::from_secs(1));
         return true;
-    }));
+    })).unwrap();
     db_conn.execute(
         "CREATE TABLE if NOT EXISTS 'nodes' (
             address TEXT PRIMARY KEY,
             last_tried INTEGER NOT NULL,
             last_seen INTEGER NOT NULL,
             user_agent TEXT NOT NULL,
-            services INTEGER NOT NULL,
+            services BLOB NOT NULL,
             starting_height INTEGER NOT NULL,
             protocol_version INTEGER NOT NULL
         )",
@@ -444,9 +444,9 @@ fn main() {
         []
     ).unwrap();
 
-    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', 0, 0, 0)").unwrap();
+    let mut new_node_stmt = db_conn.prepare("INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0)").unwrap();
     for arg in args.seednode {
-        new_node_stmt.execute([arg]).unwrap();
+        new_node_stmt.execute(params![arg, 0_u64.to_be_bytes()]).unwrap();
     }
 
     let pool = ThreadPool::new(args.threads);
@@ -463,7 +463,7 @@ fn main() {
                 last_tried: r.get(1)?,
                 last_seen: r.get(2)?,
                 user_agent: r.get(3)?,
-                services: r.get(4)?,
+                services: u64::from_be_bytes(r.get(4)?),
                 starting_height: r.get(5)?,
                 protocol_version: r.get(6)?,
             })
