@@ -7,11 +7,13 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
+use crossbeam::queue::ArrayQueue;
 use clap::Parser;
 use sha3::{Digest, Sha3_256};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time;
 use std::thread;
 use threadpool::ThreadPool;
@@ -192,6 +194,10 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 
 fn crawl_node(db_file: String, node: NodeInfo, net_status: NetStatus) {
     let db_conn = rusqlite::Connection::open(&db_file).unwrap();
+    db_conn.busy_handler(Some(|_| {
+        thread::sleep(time::Duration::from_secs(1));
+        return true;
+    }));
     println!("Crawling {}", &node.addr_str);
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
@@ -369,6 +375,7 @@ fn main() {
     let db_file = args.db_file.unwrap_or("sqlite.db".to_string());
 
     // Check proxies
+    println!("Checking onion proxy");
     let mut onion_proxy = Some(&args.onion_proxy);
     let onion_proxy_check = TcpStream::connect_timeout(&SocketAddr::from_str(&args.onion_proxy).unwrap(), time::Duration::from_secs(10));
     if onion_proxy_check.is_ok() {
@@ -379,16 +386,27 @@ fn main() {
     } else {
         onion_proxy = None;
     }
+    match onion_proxy {
+        Some(..) => println!("Onion proxy good"),
+        None => println!("Onion proxy bad"),
+    }
 
+    println!("Checking I2P proxy");
     let mut i2p_proxy = Some(&args.i2p_proxy);
     let i2p_proxy_check = TcpStream::connect_timeout(&SocketAddr::from_str(&args.i2p_proxy).unwrap(), time::Duration::from_secs(10));
     if i2p_proxy_check.is_ok() {
         if socks5_connect(&i2p_proxy_check.as_ref().unwrap(), &"gqt2klvr6r2hpdfxzt4bn2awwehsnc7l5w22fj3enbauxkhnzcoq.b32.i2p".to_string(), 80).is_err() {
             i2p_proxy = None;
+            println!("I2P proxy couldn't connect to test server");
         }
         i2p_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
     } else {
+        println!("I2P proxy didn't connect");
         i2p_proxy = None;
+    }
+    match i2p_proxy {
+        Some(..) => println!("I2P proxy good"),
+        None => println!("I2P proxy bad"),
     }
 
     let net_status = NetStatus {
@@ -400,6 +418,10 @@ fn main() {
     };
 
     let db_conn = rusqlite::Connection::open(&db_file).unwrap();
+    db_conn.busy_handler(Some(|_| {
+        thread::sleep(time::Duration::from_secs(1));
+        return true;
+    }));
     db_conn.execute(
         "CREATE TABLE if NOT EXISTS 'nodes' (
             address TEXT PRIMARY KEY,
@@ -428,10 +450,14 @@ fn main() {
     }
 
     let pool = ThreadPool::new(args.threads);
+    let queue = ArrayQueue::new(args.threads * 2);
+    let arc_queue = Arc::new(queue);
 
-    let mut select_next_node = db_conn.prepare("SELECT * FROM nodes ORDER BY last_tried ASC LIMIT 1").unwrap();
+    let mut select_next_nodes = db_conn.prepare("SELECT * FROM nodes WHERE last_tried < ? ORDER BY last_tried").unwrap();
+    let mut update_last_tried = db_conn.prepare("UPDATE nodes SET last_tried = ? WHERE address = ?").unwrap();
     loop {
-        let node = select_next_node.query_row([], |r| {
+        let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
+        let node_iter = select_next_nodes.query_map([ten_min_ago], |r| {
             Ok(NodeInfo {
                 addr_str: r.get(0)?,
                 last_tried: r.get(1)?,
@@ -442,20 +468,31 @@ fn main() {
                 protocol_version: r.get(6)?,
             })
         }).unwrap();
-        select_next_node.clear_bindings();
+        for node_r in node_iter {
+            let node = node_r.unwrap();
+            while arc_queue.is_full() {
+                thread::sleep(time::Duration::from_secs(1));
+            }
 
-        let time_tried = time::SystemTime::UNIX_EPOCH + time::Duration::from_secs(node.last_tried);
-        let since_tried = time_tried.elapsed();
-        if since_tried.is_err() || since_tried.unwrap() < time::Duration::from_secs(60 * 10) {
-            println!("Sleeping");
-            thread::sleep(time::Duration::from_secs(1));
-            continue;
+            // Update last tried now to avoid getting these again next time around
+            let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
+            update_last_tried.execute(params![tried_timestamp, &node.addr_str]).unwrap();
+            update_last_tried.clear_bindings();
+
+            arc_queue.push(node).unwrap();
+
+            let db_file_c: String = db_file.clone();
+            let net_status_c: NetStatus = net_status.clone();
+            let queue_c = arc_queue.clone();
+            pool.execute(move || {
+                while queue_c.is_empty() {
+                    thread::sleep(time::Duration::from_secs(1));
+                }
+                let next_node = queue_c.pop().unwrap();
+                crawl_node(db_file_c, next_node, net_status_c);
+            });
         }
-        let db_file_c: String = db_file.clone();
-        let net_status_c: NetStatus = net_status.clone();
-
-        pool.execute(|| {
-            crawl_node(db_file_c, node, net_status_c);
-        });
+        select_next_nodes.clear_bindings();
+        thread::sleep(time::Duration::from_secs(1));
     }
 }
