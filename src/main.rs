@@ -6,12 +6,21 @@ use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use crossbeam::queue::ArrayQueue;
+use domain::base::message::Message;
+use domain::base::message_builder::MessageBuilder;
+use domain::base::name::Dname;
+use domain::base::record::{Record, Ttl};
+use domain::base::iana::Class;
+use domain::base::iana::rcode::Rcode;
+use domain::base::iana::rtype::Rtype;
+use domain::rdata::rfc1035::A;
+use domain::rdata::aaaa::Aaaa;
 use clap::Parser;
 use sha3::{Digest, Sha3_256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -50,6 +59,9 @@ struct Args {
 
     #[arg(short, long, default_value_t = 24)]
     threads: usize,
+
+    #[arg()]
+    server_name: String,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -786,6 +798,222 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) 
     }
 }
 
+struct CachedAddrs {
+    ipv4: Vec<Ipv4Addr>,
+    ipv6: Vec<Ipv6Addr>,
+    timestamp: time::Instant,
+}
+
+impl CachedAddrs {
+    fn new() -> CachedAddrs {
+        return CachedAddrs{ipv4: vec![], ipv6: vec![], timestamp: time::Instant::now()};
+    }
+}
+
+fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String) {
+    let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
+    let seed_dname: Dname<Vec<u8>> = Dname::from_str(&seed_name).unwrap();
+
+    let sock = UdpSocket::bind(("0.0.0.0", 8353)).unwrap();
+    loop {
+        let ret: Result<(), String> = (|| -> Result<(), String> {
+            // Handle queries
+            let mut buf = [0_u8; 512];
+            let (req_len, from) = sock.recv_from(&mut buf).unwrap();
+
+            let req = match Message::from_slice(&buf[..req_len]) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(format!("E1 {}", e.to_string()));
+                },
+            };
+
+            let req_header = req.header();
+            if req_header.qr() {
+                // Ignore non-queries
+                return Err("Ignored non-query".to_string());
+            }
+            if req_header.tc() {
+                let res_builder = MessageBuilder::new_vec();
+                let res = match res_builder.start_answer(&req, Rcode::ServFail) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(format!("E2 {}", e.to_string()));
+                    },
+                };
+                let _ = sock.send_to(res.into_message().as_slice(), from);
+                return Err("Received truncated, unsupported".to_string());
+            }
+
+            // Answer the questions
+            let mut res_builder = MessageBuilder::new_vec();
+            res_builder.header_mut().set_aa(true);
+            let mut res = match res_builder.start_answer(&req, Rcode::NoError) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(format!("E3 {}", e.to_string()));
+                },
+            };
+            for q_r in req.question() {
+                let question = match q_r {
+                    Ok(q) => q,
+                    Err(..) => {
+                        continue;
+                    },
+                };
+                let name = question.qname();
+
+                // Make sure we can serve this
+                if !name.ends_with(&seed_dname) {
+                    continue; 
+                }
+
+                // Check for xNNN.<name> service flag filter
+                let mut filter: ServiceFlags = ServiceFlags::NETWORK;
+                if name.label_count() != seed_dname.label_count() {
+                    if name.label_count() != seed_dname.label_count() + 1 {
+                        continue;
+                    }
+                    let filter_label = name.first().to_string();
+                    if !filter_label.starts_with("x") || filter_label.starts_with("x0") {
+                        continue;
+                    }
+                    match u64::from_str_radix(&filter_label[1..], 16) {
+                        Ok(f) => {
+                            filter = ServiceFlags::from(f);
+                        },
+                        Err(..) => {
+                            continue;
+                        },
+                    }
+                }
+
+                // Check supported class
+                match question.qclass() {
+                    Class::In => (),
+                    _ => {
+                        continue;
+                    },
+                };
+
+                // Check supported record type
+                match question.qtype() {
+                    Rtype::A => (),
+                    Rtype::Aaaa => (),
+                    _ => {
+                        continue;
+                    },
+                };
+
+                // Check or fill cache
+                let addrs: &CachedAddrs;
+                let cached_addrs = cache.get(&filter);
+                let mut refresh_cache = cached_addrs.is_none();
+                if let Some(c) = cached_addrs {
+                    refresh_cache = c.timestamp.elapsed() > time::Duration::from_secs(60 * 10);
+                }
+                if refresh_cache {
+                    let locked_db_conn = db_conn.lock().unwrap();
+                    let mut select_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE try_count > 0 ORDER BY RANDOM()").unwrap();
+                    let node_iter = select_nodes.query_map([], |r| {
+                        Ok(NodeInfo::construct(
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            u64::from_be_bytes(r.get(4)?),
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                            r.get(10)?,
+                            r.get(11)?,
+                            r.get(12)?,
+                        ))
+                    }).unwrap();
+                    let nodes: Vec<NodeInfo> = node_iter.filter_map(|n| {
+                        match n {
+                            Ok(ni) => match ni {
+                                Ok(nni) => {
+                                    if !is_good(&nni) ||  !ServiceFlags::from(nni.services).has(filter) {
+                                        return None;
+                                    }
+                                    match nni.addr.host {
+                                        Host::Ipv4(..) => Some(nni),
+                                        Host::Ipv6(..) => Some(nni),
+                                        _ => None,
+                                    }
+                                },
+                                Err(e) => {
+                                    println!("E4 {}", e.to_string());
+                                    None
+                                },
+                            },
+                            Err(e) => {
+                                println!("E5 {}", e.to_string());
+                                None
+                            },
+                        }
+                    }).collect();
+                    let mut new_cache = CachedAddrs::new();
+                    for n in nodes {
+                        match n.addr.host {
+                            Host::Ipv4(ip) => {
+                                new_cache.ipv4.push(ip);
+                            },
+                            Host::Ipv6(ip) => {
+                                new_cache.ipv6.push(ip);
+                            },
+                            _ => {
+                                continue;
+                            },
+                        };
+                    }
+                    cache.insert(filter, new_cache);
+                    addrs = cache.get(&filter).unwrap();
+                } else {
+                    addrs = cached_addrs.unwrap();
+                }
+
+                match question.qtype() {
+                    Rtype::A => {
+                        for (i, node) in addrs.ipv4.iter().enumerate() {
+                            if i >= 20 {
+                                break;
+                            }
+                            let rec = Record::new(name, Class::In, Ttl::from_secs(30), A::new(*node));
+                            res.push(rec).unwrap();
+                        }
+                    },
+                    Rtype::Aaaa => {
+                        for (i, node) in addrs.ipv6.iter().enumerate() {
+                            if i >= 20 {
+                                break;
+                            }
+                            let rec = Record::new(name, Class::In, Ttl::from_secs(30), Aaaa::new(*node));
+                            res.push(rec).unwrap();
+                        }
+                    },
+                    _ => {
+                        continue;
+                    },
+                };
+            }
+            let _ = sock.send_to(res.into_message().as_slice(), from);
+
+            return Ok(());
+        })();
+
+        match ret {
+            Err(e) => {
+                println!("{}", e);
+            },
+            _ => ()
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -880,7 +1108,15 @@ fn main() {
         dumper_thread(db_conn_c2, &dump_file);
     });
 
+    // Start DNS thread
+    let db_conn_c3 = db_conn.clone();
+    let t_dns = thread::spawn(move || {
+        dns_thread(db_conn_c3, &args.server_name);
+    });
+
+
     // Join all threads
     t_dump.join().unwrap();
     t_crawl.join().unwrap();
+    t_dns.join().unwrap();
 }
