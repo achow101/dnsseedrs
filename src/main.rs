@@ -1114,9 +1114,11 @@ fn main() {
         dns_thread(db_conn_c3, &args.server_name);
     });
 
-
-    // Join all threads
-    t_dump.join().unwrap();
-    t_crawl.join().unwrap();
-    t_dns.join().unwrap();
+    // Watchdog, exit if any main thread has died
+    loop {
+        if t_crawl.is_finished() || t_dump.is_finished() || t_dns.is_finished() {
+            break;
+        }
+        thread::sleep(time::Duration::from_secs(60));
+    }
 }
