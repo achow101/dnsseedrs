@@ -896,7 +896,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                 }
 
                 // Check for xNNN.<name> service flag filter
-                let mut filter: ServiceFlags = ServiceFlags::NETWORK;
+                let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
                 if name.label_count() != seed_dname.label_count() {
                     if name.label_count() != seed_dname.label_count() + 1 {
                         send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
