@@ -830,6 +830,23 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
     let seed_dname: Dname<Vec<u8>> = Dname::from_str(&seed_name).unwrap();
 
+    let allowed_filters = HashSet::from([
+        ServiceFlags::NETWORK, // x1
+        ServiceFlags::NETWORK | ServiceFlags::BLOOM, // x5
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS, // x9
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS, // x49
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2, // x809
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2 | ServiceFlags::COMPACT_FILTERS, //x849
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::BLOOM, // xd
+        ServiceFlags::NETWORK_LIMITED, // x400
+        ServiceFlags::NETWORK_LIMITED | ServiceFlags::BLOOM, // x404
+        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS, // x408
+        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS, // x448
+        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2, // xc08
+        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2 | ServiceFlags::COMPACT_FILTERS, // xc48
+        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM, // x40c
+    ]);
+
     let sock = UdpSocket::bind((bind_addr.clone(), bind_port)).unwrap();
     loop {
         let ret: Result<(), String> = (|| -> Result<(), String> {
@@ -898,6 +915,10 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                             send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
                             continue;
                         },
+                    }
+                    if !allowed_filters.contains(&filter) {
+                        send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
+                        continue;
                     }
                 }
 

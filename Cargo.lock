@@ -83,7 +83,7 @@ checksum = "98f7eed2b2781a6f0b5c903471d48e15f56fb4e1165df8a9a2337fd1a59d45ea"
 [[package]]
 name = "bitcoin"
 version = "0.31.1"
-source = "git+https://github.com/achow101/rust-bitcoin?branch=fix-cjdns-decode-0.31#09358493970ea4219ca723c96da7076481e13ad7"
+source = "git+https://github.com/achow101/rust-bitcoin?branch=0.31.x-p2p_v2_service_flag#8c6a98109ac85349ce9c5673ff67d4267b3cf328"
 dependencies = [
  "bech32",
  "bitcoin-internals",
