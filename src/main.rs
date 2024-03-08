@@ -338,139 +338,160 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     }
     let sock = sock_res.unwrap();
 
-    let mut write_stream = BufWriter::new(&sock);
-    let mut read_stream = BufReader::new(&sock);
+    // Return error so we can update with failed try
+    let ret: Result<(), std::io::Error> = (|| {
+        let mut write_stream = BufWriter::new(&sock);
+        let mut read_stream = BufReader::new(&sock);
 
-    let net_magic = Magic::BITCOIN;
+        let net_magic = Magic::BITCOIN;
 
-    // Prep Version message
-    let addr_them = match &node.addr.host {
-        Host::Ipv4(ip) => Address{ services: ServiceFlags::NONE, address: ip.to_ipv6_mapped().segments(), port: node.addr.port },
-        Host::Ipv6(ip) => Address{ services: ServiceFlags::NONE, address: ip.segments(), port: node.addr.port },
-        Host::OnionV3(..) | Host::I2P(..) | Host::CJDNS(..) => Address{ services: ServiceFlags::NONE, address: [0, 0, 0, 0, 0, 0, 0, 0], port: node.addr.port },
-    };
-    let addr_me = Address{
-        services: ServiceFlags::NONE,
-        address: [0, 0, 0, 0, 0, 0, 0, 0],
-        port: 0,
-    };
-    let ver_msg = VersionMessage{
-        version: 70016,
-        services: ServiceFlags::NONE,
-        timestamp: i64::try_from(time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs()).unwrap(),
-        receiver: addr_them,
-        sender: addr_me,
-        nonce: 0,
-        user_agent: "/crawlrs:0.1.0/".to_string(),
-        start_height: -1,
-        relay: false,
-    };
-
-    // Send version message
-    RawNetworkMessage::new(net_magic, NetworkMessage::Version(ver_msg)).consensus_encode(&mut write_stream).unwrap();
-
-    // Send sendaddrv2 message
-    RawNetworkMessage::new(net_magic, NetworkMessage::SendAddrV2{}).consensus_encode(&mut write_stream).unwrap();
-    write_stream.flush().unwrap();
-
-    // Receive loop
-    let mut success = false;
-    loop {
-        let msg = RawNetworkMessage::consensus_decode(&mut read_stream).unwrap();
-        match msg.payload() {
-            NetworkMessage::Version(ver) => {
-                // Send verack
-                RawNetworkMessage::new(net_magic, NetworkMessage::Verack{}).consensus_encode(&mut write_stream).unwrap();
-
-                // Send getaddr
-                RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr{}).consensus_encode(&mut write_stream).unwrap();
-
-                let mut new_info = node.clone();
-                new_info.last_tried = tried_timestamp;
-                new_info.last_seen = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
-                new_info.user_agent = ver.user_agent.clone();
-                new_info.services = ver.services.to_u64();
-                new_info.starting_height = ver.start_height;
-                new_info.protocol_version = ver.version;
-                send_channel.send(CrawledNode::UpdatedInfo(CrawlInfo{node_info: new_info, age: age})).unwrap();
-            },
-            NetworkMessage::Addr(addrs) => {
-                println!("Received addrv1 from {}", &node.addr.to_string());
-                for (_, a) in addrs {
-                    match a.socket_addr() {
-                        Ok(s) => {
-                            match NodeInfo::new(s.to_string()) {
-                                Ok(mut new_info) => {
-                                    new_info.services = a.services.to_u64();
-                                    send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
-                                },
-                                Err(..) => (),
-                            }
-                        },
-                        Err(..) => {},
-                    };
-                }
-                success = true;
-                break
-            },
-            NetworkMessage::AddrV2(addrs) => {
-                println!("Received addrv2 from {}", &node.addr.to_string());
-                for a in addrs {
-                    let addrstr = match a.addr {
-                        AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => {
-                            match a.socket_addr() {
-                                Ok(s) => Ok(s.to_string()),
-                                Err(..) => Err("IP type address couldn't be turned into SocketAddr")
-                            }
-                        },
-                        AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip.to_string(), &a.port.to_string())),
-                        AddrV2::TorV2(..) => Err("who's advertising torv2????"),
-                        AddrV2::TorV3(host) => {
-                            let mut to_hash: Vec<u8> = vec![];
-                            to_hash.extend_from_slice(b".onion checksum");
-                            to_hash.extend_from_slice(&host);
-                            to_hash.push(0x03);
-                            let checksum = Sha3_256::new()
-                                .chain_update(to_hash)
-                                .finalize();
-
-                            let mut to_enc: Vec<u8> = vec![];
-                            to_enc.extend_from_slice(&host);
-                            to_enc.extend_from_slice(&checksum[0..2]);
-                            to_enc.push(0x03);
-
-                            Ok(format!("{}.onion:{}", Base32Unpadded::encode_string(&to_enc).trim_matches(char::from(0)), &a.port.to_string()).to_string())
-                        },
-                        AddrV2::I2p(host) => Ok(format!("{}.b32.i2p:{}", Base32Unpadded::encode_string(&host), &a.port.to_string()).to_string()),
-                        _ => Err("unknown"),
-                    };
-                    match addrstr {
-                        Ok(s) => {
-                            match NodeInfo::new(s.to_string()) {
-                                Ok(mut new_info) => {
-                                    new_info.services = a.services.to_u64();
-                                    send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
-                                },
-                                Err(..) => (),
-                            }
-                        },
-                        Err(e) => println!("Error: {}", e),
-                    }
-                }
-                success = true;
-                break
-            },
-            NetworkMessage::Ping(ping) => {
-                RawNetworkMessage::new(net_magic, NetworkMessage::Pong(*ping)).consensus_encode(&mut write_stream).unwrap();
-            },
-            _ => ()
+        // Prep Version message
+        let addr_them = match &node.addr.host {
+            Host::Ipv4(ip) => Address{ services: ServiceFlags::NONE, address: ip.to_ipv6_mapped().segments(), port: node.addr.port },
+            Host::Ipv6(ip) => Address{ services: ServiceFlags::NONE, address: ip.segments(), port: node.addr.port },
+            Host::OnionV3(..) | Host::I2P(..) | Host::CJDNS(..) => Address{ services: ServiceFlags::NONE, address: [0, 0, 0, 0, 0, 0, 0, 0], port: node.addr.port },
         };
+        let addr_me = Address{
+            services: ServiceFlags::NONE,
+            address: [0, 0, 0, 0, 0, 0, 0, 0],
+            port: 0,
+        };
+        let ver_msg = VersionMessage{
+            version: 70016,
+            services: ServiceFlags::NONE,
+            timestamp: i64::try_from(time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs()).unwrap(),
+            receiver: addr_them,
+            sender: addr_me,
+            nonce: 0,
+            user_agent: "/crawlrs:0.1.0/".to_string(),
+            start_height: -1,
+            relay: false,
+        };
+
+        // Send version message
+        RawNetworkMessage::new(net_magic, NetworkMessage::Version(ver_msg)).consensus_encode(&mut write_stream)?;
+
+        // Send sendaddrv2 message
+        RawNetworkMessage::new(net_magic, NetworkMessage::SendAddrV2{}).consensus_encode(&mut write_stream)?;
         write_stream.flush().unwrap();
-    }
+
+        // Receive loop
+        loop {
+            let msg = match RawNetworkMessage::consensus_decode(&mut read_stream) {
+                Ok(m) => m,
+                Err(e) => {
+                    return Err(std::io::Error::other(e.to_string()));
+                },
+            };
+            match msg.payload() {
+                NetworkMessage::Version(ver) => {
+                    // Send verack
+                    RawNetworkMessage::new(net_magic, NetworkMessage::Verack{}).consensus_encode(&mut write_stream)?;
+
+                    // Send getaddr
+                    RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr{}).consensus_encode(&mut write_stream)?;
+
+                    let mut new_info = node.clone();
+                    new_info.last_tried = tried_timestamp;
+                    new_info.last_seen = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
+                    new_info.user_agent = ver.user_agent.clone();
+                    new_info.services = ver.services.to_u64();
+                    new_info.starting_height = ver.start_height;
+                    new_info.protocol_version = ver.version;
+                    match send_channel.send(CrawledNode::UpdatedInfo(CrawlInfo{node_info: new_info, age: age})) {
+                        Ok(..) => (),
+                        Err(e) => {
+                            return Err(std::io::Error::other(e.to_string()));
+                        },
+                    };
+                },
+                NetworkMessage::Addr(addrs) => {
+                    println!("Received addrv1 from {}", &node.addr.to_string());
+                    for (_, a) in addrs {
+                        match a.socket_addr() {
+                            Ok(s) => {
+                                match NodeInfo::new(s.to_string()) {
+                                    Ok(mut new_info) => {
+                                        new_info.services = a.services.to_u64();
+                                        match send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})) {
+                                            Ok(..) => (),
+                                            Err(e) => {
+                                                return Err(std::io::Error::other(e.to_string()));
+                                            },
+                                        };
+                                    },
+                                    Err(..) => (),
+                                }
+                            },
+                            Err(..) => {},
+                        };
+                    }
+                    break
+                },
+                NetworkMessage::AddrV2(addrs) => {
+                    println!("Received addrv2 from {}", &node.addr.to_string());
+                    for a in addrs {
+                        let addrstr = match a.addr {
+                            AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => {
+                                match a.socket_addr() {
+                                    Ok(s) => Ok(s.to_string()),
+                                    Err(..) => Err("IP type address couldn't be turned into SocketAddr")
+                                }
+                            },
+                            AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip.to_string(), &a.port.to_string())),
+                            AddrV2::TorV2(..) => Err("who's advertising torv2????"),
+                            AddrV2::TorV3(host) => {
+                                let mut to_hash: Vec<u8> = vec![];
+                                to_hash.extend_from_slice(b".onion checksum");
+                                to_hash.extend_from_slice(&host);
+                                to_hash.push(0x03);
+                                let checksum = Sha3_256::new()
+                                    .chain_update(to_hash)
+                                    .finalize();
+
+                                let mut to_enc: Vec<u8> = vec![];
+                                to_enc.extend_from_slice(&host);
+                                to_enc.extend_from_slice(&checksum[0..2]);
+                                to_enc.push(0x03);
+
+                                Ok(format!("{}.onion:{}", Base32Unpadded::encode_string(&to_enc).trim_matches(char::from(0)), &a.port.to_string()).to_string())
+                            },
+                            AddrV2::I2p(host) => Ok(format!("{}.b32.i2p:{}", Base32Unpadded::encode_string(&host), &a.port.to_string()).to_string()),
+                            _ => Err("unknown"),
+                        };
+                        match addrstr {
+                            Ok(s) => {
+                                match NodeInfo::new(s.to_string()) {
+                                    Ok(mut new_info) => {
+                                        new_info.services = a.services.to_u64();
+                                        match send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})) {
+                                            Ok(..) => (),
+                                            Err(e) => {
+                                                return Err(std::io::Error::other(e.to_string()));
+                                            },
+                                        };
+                                    },
+                                    Err(..) => (),
+                                }
+                            },
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    }
+                    break
+                },
+                NetworkMessage::Ping(ping) => {
+                    RawNetworkMessage::new(net_magic, NetworkMessage::Pong(*ping)).consensus_encode(&mut write_stream)?;
+                },
+                _ => ()
+            };
+            write_stream.flush().unwrap();
+        }
+        return Ok(());
+    })();
 
     sock.shutdown(Shutdown::Both).unwrap();
 
-    if !success {
+    if ret.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
         send_channel.send(CrawledNode::Failed(CrawlInfo{node_info: node_info, age: age})).unwrap();
