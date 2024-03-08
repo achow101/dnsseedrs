@@ -52,6 +52,7 @@ struct Args {
     threads: usize,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum Host {
     Ipv4(Ipv4Addr),
     Ipv6(Ipv6Addr),
@@ -60,14 +61,26 @@ enum Host {
     I2P(String),
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct NodeAddress {
     host: Host,
     port: u16,
 }
 
+impl ToString for NodeAddress {
+    fn to_string(&self) -> String {
+        match &self.host {
+            Host::Ipv4(ip) => format!("{}:{}", ip.to_string(), self.port),
+            Host::Ipv6(ip) | Host::CJDNS(ip) => format!("[{}]:{}", ip.to_string(), self.port),
+            Host::OnionV3(s) | Host::I2P(s) => format!("{}:{}", s, self.port),
+        }
+    }
+}
+
+
 #[derive(Debug, Clone)]
 struct NodeInfo {
-    addr_str: String,
+    addr: NodeAddress,
     last_tried: u64,
     last_seen: u64,
     user_agent: String,
@@ -83,21 +96,42 @@ struct NodeInfo {
 }
 
 impl NodeInfo {
-    fn new(addr: String) -> NodeInfo {
-        return NodeInfo{
-            addr_str: addr,
-            last_tried: 0,
-            last_seen: 0,
-            user_agent: "".to_string(),
-            services: 0,
-            starting_height: 0,
-            protocol_version: 0,
-            try_count: 0,
-            reliability_2h: 0.0,
-            reliability_8h: 0.0,
-            reliability_1d: 0.0,
-            reliability_1w: 0.0,
-            reliability_1m: 0.0,
+    fn new(addr: String) -> Result<NodeInfo, String> {
+        return Self::construct(addr, 0, 0, "".to_string(), 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+
+    fn construct(
+        addr_str: String,
+        last_tried: u64,
+        last_seen: u64,
+        user_agent: String,
+        services: u64,
+        starting_height: i32,
+        protocol_version: u32,
+        try_count: i64,
+        reliability_2h: f64,
+        reliability_8h: f64,
+        reliability_1d: f64,
+        reliability_1w: f64,
+        reliability_1m: f64,
+    ) -> Result<NodeInfo, String> {
+        match parse_address(&addr_str) {
+            Ok(a) => Ok(NodeInfo{
+                addr: a,
+                last_tried: last_tried,
+                last_seen: last_seen,
+                user_agent: user_agent,
+                services: services,
+                starting_height: starting_height,
+                protocol_version: protocol_version,
+                try_count: try_count,
+                reliability_2h: reliability_2h,
+                reliability_8h: reliability_8h,
+                reliability_1d: reliability_1d,
+                reliability_1w: reliability_1w,
+                reliability_1m: reliability_1m,
+            }),
+            Err(e) => Err(e.to_string()),
         }
     }
 }
@@ -253,27 +287,26 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 }
 
 fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status: NetStatus) {
-    println!("Crawling {}", &node.addr_str);
+    println!("Crawling {}", &node.addr.to_string());
 
     let tried_timestamp = time::SystemTime::now().duration_since(time::UNIX_EPOCH).unwrap().as_secs();
     let age = tried_timestamp - node.last_tried;
 
-    let node_addr = parse_address(&node.addr_str).unwrap();
-    let sock_res = match node_addr.host {
+    let sock_res = match node.addr.host {
         Host::Ipv4(ip) if net_status.ipv4 => {
-            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), node_addr.port), time::Duration::from_secs(10))
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V4(ip), node.addr.port), time::Duration::from_secs(10))
         },
         Host::Ipv6(ip) if net_status.ipv6 => {
-            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10))
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node.addr.port), time::Duration::from_secs(10))
         },
         Host::CJDNS(ip) if net_status.cjdns => {
-            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node_addr.port), time::Duration::from_secs(10))
+            TcpStream::connect_timeout(&SocketAddr::new(IpAddr::V6(ip), node.addr.port), time::Duration::from_secs(10))
         },
         Host::OnionV3(ref host) if net_status.onion_proxy.is_some() => {
             let proxy_addr = net_status.onion_proxy.as_ref().unwrap();
             let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
             if stream.is_ok() {
-                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port);
+                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node.addr.port);
                 match cr {
                     Ok(..) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
@@ -286,7 +319,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
             let proxy_addr = net_status.i2p_proxy.as_ref().unwrap();
             let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
             if stream.is_err() {
-                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node_addr.port);
+                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node.addr.port);
                 match cr {
                     Ok(..) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
@@ -311,10 +344,10 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     let net_magic = Magic::BITCOIN;
 
     // Prep Version message
-    let addr_them = match &node_addr.host {
-        Host::Ipv4(ip) => Address{ services: ServiceFlags::NONE, address: ip.to_ipv6_mapped().segments(), port: node_addr.port },
-        Host::Ipv6(ip) => Address{ services: ServiceFlags::NONE, address: ip.segments(), port: node_addr.port },
-        Host::OnionV3(..) | Host::I2P(..) | Host::CJDNS(..) => Address{ services: ServiceFlags::NONE, address: [0, 0, 0, 0, 0, 0, 0, 0], port: node_addr.port },
+    let addr_them = match &node.addr.host {
+        Host::Ipv4(ip) => Address{ services: ServiceFlags::NONE, address: ip.to_ipv6_mapped().segments(), port: node.addr.port },
+        Host::Ipv6(ip) => Address{ services: ServiceFlags::NONE, address: ip.segments(), port: node.addr.port },
+        Host::OnionV3(..) | Host::I2P(..) | Host::CJDNS(..) => Address{ services: ServiceFlags::NONE, address: [0, 0, 0, 0, 0, 0, 0, 0], port: node.addr.port },
     };
     let addr_me = Address{
         services: ServiceFlags::NONE,
@@ -362,13 +395,17 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                 send_channel.send(CrawledNode::UpdatedInfo(CrawlInfo{node_info: new_info, age: age})).unwrap();
             },
             NetworkMessage::Addr(addrs) => {
-                println!("Received addrv1 from {}", &node.addr_str);
+                println!("Received addrv1 from {}", &node.addr.to_string());
                 for (_, a) in addrs {
                     match a.socket_addr() {
                         Ok(s) => {
-                            let mut new_info = NodeInfo::new(s.to_string());
-                            new_info.services = a.services.to_u64();
-                            send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
+                            match NodeInfo::new(s.to_string()) {
+                                Ok(mut new_info) => {
+                                    new_info.services = a.services.to_u64();
+                                    send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
+                                },
+                                Err(..) => (),
+                            }
                         },
                         Err(..) => {},
                     };
@@ -377,7 +414,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                 break
             },
             NetworkMessage::AddrV2(addrs) => {
-                println!("Received addrv2 from {}", &node.addr_str);
+                println!("Received addrv2 from {}", &node.addr.to_string());
                 for a in addrs {
                     let addrstr = match a.addr {
                         AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => {
@@ -409,10 +446,14 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                     };
                     match addrstr {
                         Ok(s) => {
-                            let mut new_info = NodeInfo::new(s.to_string());
-                            new_info.services = a.services.to_u64();
-                            send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
-                        }
+                            match NodeInfo::new(s.to_string()) {
+                                Ok(mut new_info) => {
+                                    new_info.services = a.services.to_u64();
+                                    send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})).unwrap();
+                                },
+                                Err(..) => (),
+                            }
+                        },
                         Err(e) => println!("Error: {}", e),
                     }
                 }
@@ -443,8 +484,7 @@ fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64
 }
 
 fn is_good(node: &NodeInfo) -> bool {
-    let node_addr = parse_address(&node.addr_str).unwrap();
-    if node_addr.port != 8333 {
+    if node.addr.port != 8333 {
         return false;
     }
     if !ServiceFlags::from(node.services).has(ServiceFlags::NETWORK) {
@@ -481,7 +521,7 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
     let pool = ThreadPool::new(threads - 1);
 
     // Shared between fetcher and finisher thread
-    let nodes_in_flight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let nodes_in_flight: Arc<Mutex<HashSet<NodeAddress>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // Finisher thread to receive newly found addrs and update node info and try
     let (tx, rx) = sync_channel::<CrawledNode>(threads * 1000 * 2);
@@ -519,10 +559,10 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
                             calculate_reliability(false, info.node_info.reliability_1d, info.age, 3600 * 24),
                             calculate_reliability(false, info.node_info.reliability_1w, info.age, 3600 * 24 * 7),
                             calculate_reliability(false, info.node_info.reliability_1m, info.age, 3600 * 24 * 30),
-                            info.node_info.addr_str,
+                            info.node_info.addr.to_string(),
                         ]
                     ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr_str);
+                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr);
                 },
                 CrawledNode::UpdatedInfo(info) => {
                     locked_db_conn.execute(
@@ -553,17 +593,17 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
                             calculate_reliability(true, info.node_info.reliability_1d, info.age, 3600 * 24),
                             calculate_reliability(true, info.node_info.reliability_1w, info.age, 3600 * 24 * 7),
                             calculate_reliability(true, info.node_info.reliability_1m, info.age, 3600 * 24 * 30),
-                            info.node_info.addr_str,
+                            info.node_info.addr.to_string(),
                         ]
                     ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr_str);
+                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr);
                 },
                 CrawledNode::NewNode(info) => {
                     locked_db_conn.execute(
                         "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)",
-                        params![&info.node_info.addr_str, info.node_info.services.to_be_bytes()]
+                        params![&info.node_info.addr.to_string(), info.node_info.services.to_be_bytes()]
                     ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr_str);
+                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr);
                 },
             }
             i += 1;
@@ -576,29 +616,36 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
 
     // Work fetcher loop
     loop {
-        let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
-        let mut nodes: Vec<NodeInfo> = vec![];
+        let nodes: Vec<NodeInfo>;
         {
             let locked_db_conn = db_conn.lock().unwrap();
             let mut select_next_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE last_tried < ? ORDER BY last_tried").unwrap();
-            let node_iter = select_next_nodes.query_map([ten_min_ago], |r| {
-                Ok(NodeInfo {
-                    addr_str: r.get(0)?,
-                    last_tried: r.get(1)?,
-                    last_seen: r.get(2)?,
-                    user_agent: r.get(3)?,
-                    services: u64::from_be_bytes(r.get(4)?),
-                    starting_height: r.get(5)?,
-                    protocol_version: r.get(6)?,
-                    try_count: r.get(7)?,
-                    reliability_2h: r.get(8)?,
-                    reliability_8h: r.get(9)?,
-                    reliability_1d: r.get(10)?,
-                    reliability_1w: r.get(11)?,
-                    reliability_1m: r.get(12)?,
-                })
+            let node_iter = select_next_nodes.query_map([], |r| {
+                Ok(NodeInfo::construct(
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                ))
             }).unwrap();
-            nodes = node_iter.map(|n| n.unwrap()).collect();
+            nodes = node_iter.filter_map(|n| {
+                match n {
+                    Ok(ni) => match ni {
+                        Ok(nni) => Some(nni),
+                        Err(..) => None,
+                    },
+                    Err(..) => None,
+                }
+            }).collect();
         }
         for node in nodes {
             while arc_queue.is_full() {
@@ -607,10 +654,10 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
 
             {
                 let mut l_nodes_in_flight = nodes_in_flight.lock().unwrap();
-                if l_nodes_in_flight.get(&node.addr_str).is_some() {
+                if l_nodes_in_flight.get(&node.addr).is_some() {
                     continue;
                 }
-                l_nodes_in_flight.insert(node.addr_str.clone());
+                l_nodes_in_flight.insert(node.addr.clone());
             }
 
             arc_queue.push(node).unwrap();
@@ -643,28 +690,36 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) 
             count += 1;
         }
 
-        let mut nodes: Vec<NodeInfo> = vec![];
+        let nodes: Vec<NodeInfo>;
         {
             let locked_db_conn = db_conn.lock().unwrap();
             let mut select_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE try_count > 0").unwrap();
             let node_iter = select_nodes.query_map([], |r| {
-                Ok(NodeInfo {
-                    addr_str: r.get(0)?,
-                    last_tried: r.get(1)?,
-                    last_seen: r.get(2)?,
-                    user_agent: r.get(3)?,
-                    services: u64::from_be_bytes(r.get(4)?),
-                    starting_height: r.get(5)?,
-                    protocol_version: r.get(6)?,
-                    try_count: r.get(7)?,
-                    reliability_2h: r.get(8)?,
-                    reliability_8h: r.get(9)?,
-                    reliability_1d: r.get(10)?,
-                    reliability_1w: r.get(11)?,
-                    reliability_1m: r.get(12)?,
-                })
+                Ok(NodeInfo::construct(
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                ))
             }).unwrap();
-            nodes = node_iter.map(|n| n.unwrap()).collect();
+            nodes = node_iter.filter_map(|n| {
+                match n {
+                    Ok(ni) => match ni {
+                        Ok(nni) => Some(nni),
+                        Err(..) => None,
+                    },
+                    Err(..) => None,
+                }
+            }).collect();
         }
 
         let mut f = File::create(dump_file).unwrap();
@@ -686,7 +741,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) 
         for node in nodes {
             write!(f,
                 "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}\n",
-                node.addr_str,
+                node.addr.to_string(),
                 i32::from(is_good(&node)),
                 node.last_seen,
                 node.reliability_2h,
