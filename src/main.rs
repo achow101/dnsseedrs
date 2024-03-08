@@ -737,9 +737,15 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) 
                 match n {
                     Ok(ni) => match ni {
                         Ok(nni) => Some(nni),
-                        Err(..) => None,
+                        Err(e) => {
+                            println!("{}", e.to_string());
+                            None
+                        },
                     },
-                    Err(..) => None,
+                    Err(e) => {
+                        println!("{}", e.to_string());
+                        None
+                    },
                 }
             }).collect();
         }
