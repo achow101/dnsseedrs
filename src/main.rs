@@ -36,11 +36,11 @@ struct Args {
     #[arg(short, long)]
     seednode: Vec<String>,
 
-    #[arg(long)]
-    db_file: Option<String>,
+    #[arg(long, default_value = "sqlite.db")]
+    db_file: String,
 
-    #[arg(long)]
-    dump_file: Option<String>,
+    #[arg(long, default_value = "seeds.txt")]
+    dump_file: String,
 
     #[arg(long, default_value_t = true)]
     ipv4_reachable: bool,
@@ -1023,8 +1023,6 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
 fn main() {
     let args = Args::parse();
 
-    let db_file = args.db_file.unwrap_or("sqlite.db".to_string());
-
     // Check proxies
     println!("Checking onion proxy");
     let mut onion_proxy = Some(&args.onion_proxy);
@@ -1068,7 +1066,7 @@ fn main() {
         i2p_proxy: i2p_proxy.cloned(),
     };
 
-    let db_conn = Arc::new(Mutex::new(rusqlite::Connection::open(&db_file).unwrap()));
+    let db_conn = Arc::new(Mutex::new(rusqlite::Connection::open(&args.db_file).unwrap()));
     {
         let locked_db_conn = db_conn.lock().unwrap();
         locked_db_conn.busy_handler(Some(|_| {
@@ -1108,10 +1106,9 @@ fn main() {
     });
 
     // Start dumper thread
-    let dump_file = args.dump_file.unwrap_or("seeds.txt".to_string());
     let db_conn_c2 = db_conn.clone();
     let t_dump = thread::spawn(move || {
-        dumper_thread(db_conn_c2, &dump_file);
+        dumper_thread(db_conn_c2, &args.dump_file);
     });
 
     // Start DNS thread
