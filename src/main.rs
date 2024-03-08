@@ -60,6 +60,12 @@ struct Args {
     #[arg(short, long, default_value_t = 24)]
     threads: usize,
 
+    #[arg(short, long, default_value = "0.0.0.0")]
+    address: String,
+
+    #[arg(short, long, default_value_t = 53)]
+    port: u16,
+
     #[arg()]
     server_name: String,
 }
@@ -810,11 +816,11 @@ impl CachedAddrs {
     }
 }
 
-fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String) {
+fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bind_addr: &String, bind_port: u16) {
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
     let seed_dname: Dname<Vec<u8>> = Dname::from_str(&seed_name).unwrap();
 
-    let sock = UdpSocket::bind(("0.0.0.0", 8353)).unwrap();
+    let sock = UdpSocket::bind((bind_addr.clone(), bind_port)).unwrap();
     loop {
         let ret: Result<(), String> = (|| -> Result<(), String> {
             // Handle queries
@@ -1111,7 +1117,7 @@ fn main() {
     // Start DNS thread
     let db_conn_c3 = db_conn.clone();
     let t_dns = thread::spawn(move || {
-        dns_thread(db_conn_c3, &args.server_name);
+        dns_thread(db_conn_c3, &args.server_name, &args.address, args.port);
     });
 
     // Watchdog, exit if any main thread has died
