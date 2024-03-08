@@ -1,7 +1,7 @@
 use base32ct::{Base32Unpadded, Encoding};
 use bitcoin::consensus::{Decodable, Encodable};
+use bitcoin::network::Network;
 use bitcoin::p2p::address::{Address, AddrV2};
-use bitcoin::p2p::Magic;
 use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
@@ -65,6 +65,9 @@ struct Args {
 
     #[arg(short, long, default_value_t = 53)]
     port: u16,
+
+    #[arg(long, default_value = "main")]
+    chain: String,
 
     #[arg()]
     server_name: String,
@@ -161,6 +164,7 @@ struct CrawlInfo {
 
 #[derive(Clone)]
 struct NetStatus {
+    chain: Network,
     ipv4: bool,
     ipv6: bool,
     cjdns: bool,
@@ -361,7 +365,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
         let mut write_stream = BufWriter::new(&sock);
         let mut read_stream = BufReader::new(&sock);
 
-        let net_magic = Magic::BITCOIN;
+        let net_magic = net_status.chain.magic();
 
         // Prep Version message
         let addr_them = match &node.addr.host {
@@ -522,9 +526,24 @@ fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64
     return (alpha * x) + ((1.0 - alpha) * old_reliability); // alpha * x + (1 - alpha) * s_{t-1}
 }
 
-fn is_good(node: &NodeInfo) -> bool {
-    if node.addr.port != 8333 {
-        return false;
+fn default_port(chain: &Network) -> u16 {
+    return match chain {
+        Network::Bitcoin => 8333,
+        Network::Testnet => 18333,
+        Network::Signet => 38333,
+        Network::Regtest => 18444,
+        &_ => 0,
+    };
+}
+
+fn is_good(node: &NodeInfo, chain: &Network) -> bool {
+    match node.addr.host {
+        Host::I2P(..) => (),
+        _ => {
+            if node.addr.port != default_port(chain) {
+                return false;
+            }
+        },
     }
     if !ServiceFlags::from(node.services).has(ServiceFlags::NETWORK) {
         return false;
@@ -721,7 +740,7 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
     }
 }
 
-fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) {
+fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, chain: &Network) {
     let mut count = 0;
     loop {
         // Sleep for 100s, then 200s, 400s, 800s, 1600s, and then 3200s forever
@@ -788,7 +807,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) 
             write!(f,
                 "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}\n",
                 node.addr.to_string(),
-                i32::from(is_good(&node)),
+                i32::from(is_good(&node, chain)),
                 node.last_seen,
                 node.reliability_2h * 100.0,
                 node.reliability_8h * 100.0,
@@ -826,7 +845,7 @@ fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &So
     }
 }
 
-fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bind_addr: &String, bind_port: u16) {
+fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bind_addr: &String, bind_port: u16, chain: &Network) {
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
     let seed_dname: Dname<Vec<u8>> = Dname::from_str(&seed_name).unwrap();
 
@@ -972,7 +991,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                         match n {
                             Ok(ni) => match ni {
                                 Ok(nni) => {
-                                    if !is_good(&nni) ||  !ServiceFlags::from(nni.services).has(filter) {
+                                    if !is_good(&nni, chain) ||  !ServiceFlags::from(nni.services).has(filter) {
                                         return None;
                                     }
                                     match nni.addr.host {
@@ -1053,6 +1072,16 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
 fn main() {
     let args = Args::parse();
 
+    // Pick the network
+    let chain_p = Network::from_core_arg(&args.chain);
+    match chain_p {
+        Ok(Network::Bitcoin) | Ok(Network:: Testnet) | Ok(Network::Signet) => (),
+        _ => {
+            println!("Unsupported network type: {}", args.chain);
+        },
+    }
+    let chain = chain_p.unwrap();
+
     // Check proxies
     println!("Checking onion proxy");
     let mut onion_proxy = Some(&args.onion_proxy);
@@ -1089,6 +1118,7 @@ fn main() {
     }
 
     let net_status = NetStatus {
+        chain: chain.clone(),
         ipv4: args.ipv4_reachable,
         ipv6: args.ipv4_reachable,
         cjdns: args.cjdns_reachable,
@@ -1138,13 +1168,13 @@ fn main() {
     // Start dumper thread
     let db_conn_c2 = db_conn.clone();
     let t_dump = thread::spawn(move || {
-        dumper_thread(db_conn_c2, &args.dump_file);
+        dumper_thread(db_conn_c2, &args.dump_file, &chain);
     });
 
     // Start DNS thread
     let db_conn_c3 = db_conn.clone();
     let t_dns = thread::spawn(move || {
-        dns_thread(db_conn_c3, &args.server_name, &args.address, args.port);
+        dns_thread(db_conn_c3, &args.server_name, &args.address, args.port, &chain);
     });
 
     // Watchdog, exit if any main thread has died
