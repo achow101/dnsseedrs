@@ -816,6 +816,16 @@ impl CachedAddrs {
     }
 }
 
+fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &SocketAddr) {
+    let res_builder = MessageBuilder::new_vec();
+    let res = res_builder.start_answer(req, code);
+    if res.is_ok() {
+        let _ = sock.send_to(res.unwrap().into_message().as_slice(), from);
+    } else {
+        println!("Failed to send DNS error: {}", res.unwrap_err());
+    }
+}
+
 fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bind_addr: &String, bind_port: u16) {
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
     let seed_dname: Dname<Vec<u8>> = Dname::from_str(&seed_name).unwrap();
@@ -840,14 +850,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                 return Err("Ignored non-query".to_string());
             }
             if req_header.tc() {
-                let res_builder = MessageBuilder::new_vec();
-                let res = match res_builder.start_answer(&req, Rcode::ServFail) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return Err(format!("E2 {}", e.to_string()));
-                    },
-                };
-                let _ = sock.send_to(res.into_message().as_slice(), from);
+                send_dns_failed(&sock, &req, Rcode::ServFail, &from);
                 return Err("Received truncated, unsupported".to_string());
             }
 
@@ -864,6 +867,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                 let question = match q_r {
                     Ok(q) => q,
                     Err(..) => {
+                        send_dns_failed(&sock, &req, Rcode::FormErr, &from);
                         continue;
                     },
                 };
@@ -878,10 +882,12 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                 let mut filter: ServiceFlags = ServiceFlags::NETWORK;
                 if name.label_count() != seed_dname.label_count() {
                     if name.label_count() != seed_dname.label_count() + 1 {
+                        send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
                         continue;
                     }
                     let filter_label = name.first().to_string();
                     if !filter_label.starts_with("x") || filter_label.starts_with("x0") {
+                        send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
                         continue;
                     }
                     match u64::from_str_radix(&filter_label[1..], 16) {
@@ -889,6 +895,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                             filter = ServiceFlags::from(f);
                         },
                         Err(..) => {
+                            send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
                             continue;
                         },
                     }
@@ -898,6 +905,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                 match question.qclass() {
                     Class::In => (),
                     _ => {
+                        send_dns_failed(&sock, &req, Rcode::NotImp, &from);
                         continue;
                     },
                 };
@@ -907,6 +915,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
                     Rtype::A => (),
                     Rtype::Aaaa => (),
                     _ => {
+                        send_dns_failed(&sock, &req, Rcode::NotImp, &from);
                         continue;
                     },
                 };
