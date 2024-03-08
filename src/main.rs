@@ -722,7 +722,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String) 
                     r.get(1)?,
                     r.get(2)?,
                     r.get(3)?,
-                    r.get(4)?,
+                    u64::from_be_bytes(r.get(4)?),
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
