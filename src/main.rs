@@ -489,13 +489,13 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
         return Ok(());
     })();
 
-    sock.shutdown(Shutdown::Both).unwrap();
-
     if ret.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
         send_channel.send(CrawledNode::Failed(CrawlInfo{node_info: node_info, age: age})).unwrap();
     }
+
+    sock.shutdown(Shutdown::Both).unwrap();
 }
 
 fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64) -> f64 {
