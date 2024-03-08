@@ -637,17 +637,18 @@ fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net
 
     // Work fetcher loop
     loop {
+        let ten_min_ago = (time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap() - time::Duration::from_secs(60 * 10)).as_secs();
         let nodes: Vec<NodeInfo>;
         {
             let locked_db_conn = db_conn.lock().unwrap();
             let mut select_next_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE last_tried < ? ORDER BY last_tried").unwrap();
-            let node_iter = select_next_nodes.query_map([], |r| {
+            let node_iter = select_next_nodes.query_map([ten_min_ago], |r| {
                 Ok(NodeInfo::construct(
                     r.get(0)?,
                     r.get(1)?,
                     r.get(2)?,
                     r.get(3)?,
-                    r.get(4)?,
+                    u64::from_be_bytes(r.get(4)?),
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
