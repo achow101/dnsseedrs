@@ -911,6 +911,7 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
 
                 // Make sure we can serve this
                 if !name.ends_with(&seed_dname) {
+                    send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
                     continue; 
                 }
 
