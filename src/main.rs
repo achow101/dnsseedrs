@@ -536,6 +536,14 @@ fn default_port(chain: &Network) -> u16 {
     };
 }
 
+fn min_blocks(chain: &Network) -> i32 {
+    return match chain {
+        Network::Bitcoin => 800000,
+        Network::Testnet => 2500000,
+        _  => 1,
+    };
+}
+
 fn is_good(node: &NodeInfo, chain: &Network) -> bool {
     match node.addr.host {
         Host::I2P(..) => (),
@@ -551,7 +559,7 @@ fn is_good(node: &NodeInfo, chain: &Network) -> bool {
     if node.protocol_version < 70001 {
         return false;
     }
-    if node.starting_height < 350000 {
+    if node.starting_height < min_blocks(chain) {
         return false;
     }
 
