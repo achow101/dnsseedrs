@@ -510,7 +510,10 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
         send_channel.send(CrawledNode::Failed(CrawlInfo{node_info, age})).unwrap();
     }
 
-    sock.shutdown(Shutdown::Both).unwrap();
+    if let Err(e) = sock.shutdown(Shutdown::Both) {
+        eprintln!("Error shutting down socket: {}", e);
+    }
+
 }
 
 fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64) -> f64 {
