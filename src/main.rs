@@ -853,7 +853,7 @@ fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &So
     }
 }
 
-fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bind_addr: &String, bind_port: u16, chain: &Network) {
+fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, chain: &Network) {
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
     let seed_dname: Dname<Vec<u8>> = Dname::from_str(&seed_name).unwrap();
 
@@ -874,7 +874,6 @@ fn dns_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, bin
         ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM, // x40c
     ]);
 
-    let sock = UdpSocket::bind((bind_addr.clone(), bind_port)).unwrap();
     loop {
         let ret: Result<(), String> = (|| -> Result<(), String> {
             // Handle queries
@@ -1126,6 +1125,9 @@ fn main() {
         None => println!("I2P proxy bad"),
     }
 
+    // Bind socket
+    let sock = UdpSocket::bind((args.address, args.port)).unwrap();
+
     let net_status = NetStatus {
         chain: chain.clone(),
         ipv4: args.ipv4_reachable,
@@ -1183,7 +1185,7 @@ fn main() {
     // Start DNS thread
     let db_conn_c3 = db_conn.clone();
     let t_dns = thread::spawn(move || {
-        dns_thread(db_conn_c3, &args.server_name, &args.address, args.port, &chain);
+        dns_thread(sock, db_conn_c3, &args.server_name, &chain);
     });
 
     // Watchdog, exit if any main thread has died
