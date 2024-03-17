@@ -16,6 +16,8 @@ use domain::base::iana::rtype::Rtype;
 use domain::rdata::rfc1035::A;
 use domain::rdata::aaaa::Aaaa;
 use clap::Parser;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -830,11 +832,12 @@ struct CachedAddrs {
     ipv4: Vec<Ipv4Addr>,
     ipv6: Vec<Ipv6Addr>,
     timestamp: time::Instant,
+    shuffle_timestamp: time::Instant,
 }
 
 impl CachedAddrs {
     fn new() -> CachedAddrs {
-        CachedAddrs{ipv4: vec![], ipv6: vec![], timestamp: time::Instant::now()}
+        CachedAddrs{ipv4: vec![], ipv6: vec![], timestamp: time::Instant::now(), shuffle_timestamp: time::Instant::now()}
     }
 }
 
@@ -968,12 +971,11 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                 };
 
                 // Check or fill cache
-                let cached_addrs = cache.get(&filter);
-                let mut refresh_cache = cached_addrs.is_none();
-                if let Some(c) = cached_addrs {
-                    refresh_cache = c.timestamp.elapsed() > time::Duration::from_secs(60 * 10);
-                }
-                let addrs: &CachedAddrs = if refresh_cache {
+                let needs_refresh = match cache.get(&filter) {
+                    Some(c) => c.timestamp.elapsed() > time::Duration::from_secs(60 * 10),
+                    None => true,
+                };
+                if needs_refresh {
                     let locked_db_conn = db_conn.lock().unwrap();
                     let mut select_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE try_count > 0 ORDER BY RANDOM()").unwrap();
                     let node_iter = select_nodes.query_map([], |r| {
@@ -1032,9 +1034,16 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                         };
                     }
                     cache.insert(filter, new_cache);
-                    cache.get(&filter).unwrap()
-                } else {
-                    cached_addrs.unwrap()
+                };
+
+                let addrs: &mut CachedAddrs = cache.get_mut(&filter).expect("Cache should have some entries");
+
+                if addrs.shuffle_timestamp.elapsed() > time::Duration::from_secs(5) {
+                    // Shuffle cache in place
+                    let mut rng = thread_rng();
+                    addrs.ipv4.shuffle(&mut rng);
+                    addrs.ipv6.shuffle(&mut rng);
+                    addrs.shuffle_timestamp = time::Instant::now();
                 };
 
                 match question.qtype() {
