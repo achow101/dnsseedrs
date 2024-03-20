@@ -796,7 +796,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
         let mut f = File::create(dump_file).unwrap();
         writeln!(f,
             "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}user_agent",
-            "address",
+            "# address",
             "good",
             "last_seen",
             "%(2h)",
