@@ -291,6 +291,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "domain",
+ "rand",
  "rusqlite",
  "sha3",
  "threadpool",

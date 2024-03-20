@@ -16,6 +16,8 @@ use domain::base::iana::rtype::Rtype;
 use domain::rdata::rfc1035::A;
 use domain::rdata::aaaa::Aaaa;
 use clap::Parser;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -73,6 +75,7 @@ struct Args {
     server_name: String,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum Host {
     Ipv4(Ipv4Addr),
@@ -91,8 +94,8 @@ struct NodeAddress {
 impl ToString for NodeAddress {
     fn to_string(&self) -> String {
         match &self.host {
-            Host::Ipv4(ip) => format!("{}:{}", ip.to_string(), self.port),
-            Host::Ipv6(ip) | Host::CJDNS(ip) => format!("[{}]:{}", ip.to_string(), self.port),
+            Host::Ipv4(ip) => format!("{}:{}", ip, self.port),
+            Host::Ipv6(ip) | Host::CJDNS(ip) => format!("[{}]:{}", ip, self.port),
             Host::OnionV3(s) | Host::I2P(s) => format!("{}:{}", s, self.port),
         }
     }
@@ -118,9 +121,10 @@ struct NodeInfo {
 
 impl NodeInfo {
     fn new(addr: String) -> Result<NodeInfo, String> {
-        return Self::construct(addr, 0, 0, "".to_string(), 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        Self::construct(addr, 0, 0, "".to_string(), 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn construct(
         addr_str: String,
         last_tried: u64,
@@ -139,18 +143,18 @@ impl NodeInfo {
         match parse_address(&addr_str) {
             Ok(a) => Ok(NodeInfo{
                 addr: a,
-                last_tried: last_tried,
-                last_seen: last_seen,
-                user_agent: user_agent,
-                services: services,
-                starting_height: starting_height,
-                protocol_version: protocol_version,
-                try_count: try_count,
-                reliability_2h: reliability_2h,
-                reliability_8h: reliability_8h,
-                reliability_1d: reliability_1d,
-                reliability_1w: reliability_1w,
-                reliability_1m: reliability_1m,
+                last_tried,
+                last_seen,
+                user_agent,
+                services,
+                starting_height,
+                protocol_version,
+                try_count,
+                reliability_2h,
+                reliability_8h,
+                reliability_1d,
+                reliability_1w,
+                reliability_1m,
             }),
             Err(e) => Err(e.to_string()),
         }
@@ -178,8 +182,8 @@ enum CrawledNode {
     NewNode(CrawlInfo),
 }
 
-fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
-    let addr_parse_res = SocketAddr::from_str(&addr);
+fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
+    let addr_parse_res = SocketAddr::from_str(addr);
     if addr_parse_res.is_ok() {
         let parsed_addr = addr_parse_res.unwrap();
         let ip = parsed_addr.ip().to_canonical();
@@ -213,7 +217,7 @@ fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
                         || u128::from_be_bytes(ip6.octets()) == 0x2001_0001_0000_0000_0000_0000_0000_0002
                         || matches!(ip6.segments(), [0x2001, 3, _, _, _, _, _, _])
                         || matches!(ip6.segments(), [0x2001, 4, 0x112, _, _, _, _, _])
-                        || matches!(ip6.segments(), [0x2001, b, _, _, _, _, _, _] if b >= 0x20 && b <= 0x2F)
+                        || matches!(ip6.segments(), [0x2001, b, _, _, _, _, _, _] if (0x20..=0x2F).contains(&b))
                     ))
             {
                 // Check for CJDNS in fc00::/8
@@ -231,7 +235,7 @@ fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
             });
         }
     }
-    let sp: Vec<&str> = addr.split(":").collect();
+    let sp: Vec<&str> = addr.split(':').collect();
     if sp.len() != 2 {
         return Err("Invalid address, not IPv6 and multiple colons or colon not found");
     }
@@ -240,16 +244,16 @@ fn parse_address(addr: &String) -> Result<NodeAddress, &'static str> {
     if host.len() == 62 && host.ends_with(".onion") {
         return Ok(NodeAddress{
             host: Host::OnionV3(host.to_string()),
-            port: port,
+            port,
         });
     }
     if host.len() == 60 && host.ends_with(".b32.i2p") {
         return Ok(NodeAddress{
             host: Host::I2P(host.to_string()),
-            port: port,
+            port,
         });
     }
-    return Err("Invalid address");
+    Err("Invalid address")
 }
 
 fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(), &'static str> {
@@ -258,7 +262,7 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 
     // Send first socks message
     // Version (0x05) | Num Auth Methods (0x01) | Auth Method NoAuth (0x00)
-    write_stream.write(&[0x05, 0x01, 0x00]).unwrap();
+    write_stream.write_all(&[0x05, 0x01, 0x00]).unwrap();
     write_stream.flush().unwrap();
 
     // Get Server's chosen auth method
@@ -273,11 +277,11 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 
     // Send request
     // Version (0x05) | Connect Command (0x01) | Reserved (0x00) | Domain name address type (0x03)
-    write_stream.write(&[0x05, 0x01, 0x00, 0x03]).unwrap();
+    write_stream.write_all(&[0x05, 0x01, 0x00, 0x03]).unwrap();
     // The destination we want the server to connect to
-    write_stream.write(&[u8::try_from(destination.len()).unwrap()]).unwrap();
-    write_stream.write(destination.as_bytes()).unwrap();
-    write_stream.write(&port.to_be_bytes()).unwrap();
+    write_stream.write_all(&[u8::try_from(destination.len()).unwrap()]).unwrap();
+    write_stream.write_all(destination.as_bytes()).unwrap();
+    write_stream.write_all(&port.to_be_bytes()).unwrap();
     write_stream.flush().unwrap();
 
     // Get reply
@@ -305,7 +309,7 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
         read_stream.read_exact(&mut server_bound_addr).unwrap();
     }
 
-    return Ok(());
+    Ok(())
 }
 
 fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status: NetStatus) {
@@ -326,9 +330,9 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
         },
         Host::OnionV3(ref host) if net_status.onion_proxy.is_some() => {
             let proxy_addr = net_status.onion_proxy.as_ref().unwrap();
-            let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
+            let stream = TcpStream::connect_timeout(&SocketAddr::from_str(proxy_addr).unwrap(), time::Duration::from_secs(10));
             if stream.is_ok() {
-                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node.addr.port);
+                let cr = socks5_connect(stream.as_ref().unwrap(), host, node.addr.port);
                 match cr {
                     Ok(..) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
@@ -339,9 +343,9 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
         },
         Host::I2P(ref host) if net_status.i2p_proxy.is_some() => {
             let proxy_addr = net_status.i2p_proxy.as_ref().unwrap();
-            let stream = TcpStream::connect_timeout(&SocketAddr::from_str(&proxy_addr).unwrap(), time::Duration::from_secs(10));
+            let stream = TcpStream::connect_timeout(&SocketAddr::from_str(proxy_addr).unwrap(), time::Duration::from_secs(10));
             if stream.is_err() {
-                let cr = socks5_connect(&stream.as_ref().unwrap(), &host, node.addr.port);
+                let cr = socks5_connect(stream.as_ref().unwrap(), host, node.addr.port);
                 match cr {
                     Ok(..) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
@@ -355,8 +359,8 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     if sock_res.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
-        send_channel.send(CrawledNode::Failed(CrawlInfo{node_info: node_info, age: age})).unwrap();
-        return ();
+        send_channel.send(CrawledNode::Failed(CrawlInfo{node_info, age})).unwrap();
+        return;
     }
     let sock = sock_res.unwrap();
 
@@ -420,7 +424,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                     new_info.services = ver.services.to_u64();
                     new_info.starting_height = ver.start_height;
                     new_info.protocol_version = ver.version;
-                    match send_channel.send(CrawledNode::UpdatedInfo(CrawlInfo{node_info: new_info, age: age})) {
+                    match send_channel.send(CrawledNode::UpdatedInfo(CrawlInfo{node_info: new_info, age})) {
                         Ok(..) => (),
                         Err(e) => {
                             return Err(std::io::Error::other(e.to_string()));
@@ -430,22 +434,16 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                 NetworkMessage::Addr(addrs) => {
                     println!("Received addrv1 from {}", &node.addr.to_string());
                     for (_, a) in addrs {
-                        match a.socket_addr() {
-                            Ok(s) => {
-                                match NodeInfo::new(s.to_string()) {
-                                    Ok(mut new_info) => {
-                                        new_info.services = a.services.to_u64();
-                                        match send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})) {
-                                            Ok(..) => (),
-                                            Err(e) => {
-                                                return Err(std::io::Error::other(e.to_string()));
-                                            },
-                                        };
+                        if let Ok(s) = a.socket_addr() {
+                            if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
+                                new_info.services = a.services.to_u64();
+                                match send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})) {
+                                    Ok(..) => (),
+                                    Err(e) => {
+                                        return Err(std::io::Error::other(e.to_string()));
                                     },
-                                    Err(..) => (),
-                                }
-                            },
-                            Err(..) => {},
+                                };
+                            }
                         };
                     }
                     break
@@ -460,7 +458,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                                     Err(..) => Err("IP type address couldn't be turned into SocketAddr")
                                 }
                             },
-                            AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip.to_string(), &a.port.to_string())),
+                            AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip, &a.port.to_string())),
                             AddrV2::TorV2(..) => Err("who's advertising torv2????"),
                             AddrV2::TorV3(host) => {
                                 let mut to_hash: Vec<u8> = vec![];
@@ -483,17 +481,14 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                         };
                         match addrstr {
                             Ok(s) => {
-                                match NodeInfo::new(s.to_string()) {
-                                    Ok(mut new_info) => {
-                                        new_info.services = a.services.to_u64();
-                                        match send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})) {
-                                            Ok(..) => (),
-                                            Err(e) => {
-                                                return Err(std::io::Error::other(e.to_string()));
-                                            },
-                                        };
-                                    },
-                                    Err(..) => (),
+                                if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
+                                    new_info.services = a.services.to_u64();
+                                    match send_channel.send(CrawledNode::NewNode(CrawlInfo{node_info: new_info, age: 0})) {
+                                        Ok(..) => (),
+                                        Err(e) => {
+                                            return Err(std::io::Error::other(e.to_string()));
+                                        },
+                                    };
                                 }
                             },
                             Err(e) => println!("Error: {}", e),
@@ -508,40 +503,43 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
             };
             write_stream.flush().unwrap();
         }
-        return Ok(());
+        Ok(())
     })();
 
     if ret.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
-        send_channel.send(CrawledNode::Failed(CrawlInfo{node_info: node_info, age: age})).unwrap();
+        send_channel.send(CrawledNode::Failed(CrawlInfo{node_info, age})).unwrap();
     }
 
-    sock.shutdown(Shutdown::Both).unwrap();
+    if let Err(e) = sock.shutdown(Shutdown::Both) {
+        eprintln!("Error shutting down socket: {}", e);
+    }
+
 }
 
 fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64) -> f64 {
     let alpha = 1.0 - (-1.0 * age as f64 / window as f64).exp(); // 1 - e^(-delta T / tau)
     let x = if good { 1.0 } else { 0.0 };
-    return (alpha * x) + ((1.0 - alpha) * old_reliability); // alpha * x + (1 - alpha) * s_{t-1}
+    (alpha * x) + ((1.0 - alpha) * old_reliability)// alpha * x + (1 - alpha) * s_{t-1}
 }
 
 fn default_port(chain: &Network) -> u16 {
-    return match chain {
+    match chain {
         Network::Bitcoin => 8333,
         Network::Testnet => 18333,
         Network::Signet => 38333,
         Network::Regtest => 18444,
         &_ => 0,
-    };
+    }
 }
 
 fn min_blocks(chain: &Network) -> i32 {
-    return match chain {
+    match chain {
         Network::Bitcoin => 800000,
         Network::Testnet => 2500000,
         _  => 1,
-    };
+    }
 }
 
 fn is_good(node: &NodeInfo, chain: &Network) -> bool {
@@ -579,7 +577,7 @@ fn is_good(node: &NodeInfo, chain: &Network) -> bool {
         return true;
     }
 
-    return false;
+    false
 }
 
 fn crawler_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, threads: usize, net_status: NetStatus) {
@@ -783,12 +781,12 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
                     Ok(ni) => match ni {
                         Ok(nni) => Some(nni),
                         Err(e) => {
-                            println!("{}", e.to_string());
+                            println!("{}", e);
                             None
                         },
                     },
                     Err(e) => {
-                        println!("{}", e.to_string());
+                        println!("{}", e);
                         None
                     },
                 }
@@ -796,8 +794,8 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
         }
 
         let mut f = File::create(dump_file).unwrap();
-        write!(f,
-            "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}{}\n",
+        writeln!(f,
+            "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}user_agent",
             "address",
             "good",
             "last_seen",
@@ -808,12 +806,11 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
             "%(1m)",
             "blocks",
             "services",
-            "version",
-            "user_agent"
+            "version"
         ).unwrap();
         for node in nodes {
-            write!(f,
-                "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}\n",
+            writeln!(f,
+                "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}",
                 node.addr.to_string(),
                 i32::from(is_good(&node, chain)),
                 node.last_seen,
@@ -835,27 +832,32 @@ struct CachedAddrs {
     ipv4: Vec<Ipv4Addr>,
     ipv6: Vec<Ipv6Addr>,
     timestamp: time::Instant,
+    shuffle_timestamp: time::Instant,
 }
 
 impl CachedAddrs {
     fn new() -> CachedAddrs {
-        return CachedAddrs{ipv4: vec![], ipv6: vec![], timestamp: time::Instant::now()};
+        CachedAddrs{ipv4: vec![], ipv6: vec![], timestamp: time::Instant::now(), shuffle_timestamp: time::Instant::now()}
     }
 }
 
 fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &SocketAddr) {
     let res_builder = MessageBuilder::new_vec();
     let res = res_builder.start_answer(req, code);
-    if res.is_ok() {
-        let _ = sock.send_to(res.unwrap().into_message().as_slice(), from);
-    } else {
-        println!("Failed to send DNS error: {}", res.unwrap_err());
+    match res.is_ok() {
+        true => {
+            let _ = sock.send_to(res.unwrap().into_message().as_slice(), from);
+        }
+        false => {
+            println!("Failed to send DNS error: {}", res.unwrap_err());
+        }
     }
 }
 
 fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_name: &String, chain: &Network) {
+#[allow(clippy::single_char_pattern)]
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
-    let seed_dname: Dname<Vec<u8>> = Dname::from_str(&seed_name).unwrap();
+    let seed_dname: Dname<Vec<u8>> = Dname::from_str(seed_name).unwrap();
 
     let allowed_filters = HashSet::from([
         ServiceFlags::NETWORK, // x1
@@ -883,7 +885,7 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
             let req = match Message::from_slice(&buf[..req_len]) {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(format!("E1 {}", e.to_string()));
+                    return Err(format!("E1 {}", e));
                 },
             };
 
@@ -893,24 +895,24 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                 return Err("Ignored non-query".to_string());
             }
             if req_header.tc() {
-                send_dns_failed(&sock, &req, Rcode::ServFail, &from);
+                send_dns_failed(&sock, req, Rcode::ServFail, &from);
                 return Err("Received truncated, unsupported".to_string());
             }
 
             // Answer the questions
             let mut res_builder = MessageBuilder::new_vec();
             res_builder.header_mut().set_aa(true);
-            let mut res = match res_builder.start_answer(&req, Rcode::NoError) {
+            let mut res = match res_builder.start_answer(req, Rcode::NoError) {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(format!("E3 {}", e.to_string()));
+                    return Err(format!("E3 {}", e));
                 },
             };
             for q_r in req.question() {
                 let question = match q_r {
                     Ok(q) => q,
                     Err(..) => {
-                        send_dns_failed(&sock, &req, Rcode::FormErr, &from);
+                        send_dns_failed(&sock, req, Rcode::FormErr, &from);
                         continue;
                     },
                 };
@@ -918,7 +920,7 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
 
                 // Make sure we can serve this
                 if !name.ends_with(&seed_dname) {
-                    send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
+                    send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                     continue; 
                 }
 
@@ -926,12 +928,12 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                 let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
                 if name.label_count() != seed_dname.label_count() {
                     if name.label_count() != seed_dname.label_count() + 1 {
-                        send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
+                        send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                         continue;
                     }
                     let filter_label = name.first().to_string();
                     if !filter_label.starts_with("x") || filter_label.starts_with("x0") {
-                        send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
+                        send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                         continue;
                     }
                     match u64::from_str_radix(&filter_label[1..], 16) {
@@ -939,12 +941,12 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                             filter = ServiceFlags::from(f);
                         },
                         Err(..) => {
-                            send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
+                            send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                             continue;
                         },
                     }
                     if !allowed_filters.contains(&filter) {
-                        send_dns_failed(&sock, &req, Rcode::NXDomain, &from);
+                        send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                         continue;
                     }
                 }
@@ -953,7 +955,7 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                 match question.qclass() {
                     Class::In => (),
                     _ => {
-                        send_dns_failed(&sock, &req, Rcode::NotImp, &from);
+                        send_dns_failed(&sock, req, Rcode::NotImp, &from);
                         continue;
                     },
                 };
@@ -963,19 +965,17 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                     Rtype::A => (),
                     Rtype::Aaaa => (),
                     _ => {
-                        send_dns_failed(&sock, &req, Rcode::NotImp, &from);
+                        send_dns_failed(&sock, req, Rcode::NotImp, &from);
                         continue;
                     },
                 };
 
                 // Check or fill cache
-                let addrs: &CachedAddrs;
-                let cached_addrs = cache.get(&filter);
-                let mut refresh_cache = cached_addrs.is_none();
-                if let Some(c) = cached_addrs {
-                    refresh_cache = c.timestamp.elapsed() > time::Duration::from_secs(60 * 10);
-                }
-                if refresh_cache {
+                let needs_refresh = match cache.get(&filter) {
+                    Some(c) => c.timestamp.elapsed() > time::Duration::from_secs(60 * 10),
+                    None => true,
+                };
+                if needs_refresh {
                     let locked_db_conn = db_conn.lock().unwrap();
                     let mut select_nodes = locked_db_conn.prepare("SELECT * FROM nodes WHERE try_count > 0 ORDER BY RANDOM()").unwrap();
                     let node_iter = select_nodes.query_map([], |r| {
@@ -1009,12 +1009,12 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                                     }
                                 },
                                 Err(e) => {
-                                    println!("E4 {}", e.to_string());
+                                    println!("E4 {}", e);
                                     None
                                 },
                             },
                             Err(e) => {
-                                println!("E5 {}", e.to_string());
+                                println!("E5 {}", e);
                                 None
                             },
                         }
@@ -1034,10 +1034,17 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
                         };
                     }
                     cache.insert(filter, new_cache);
-                    addrs = cache.get(&filter).unwrap();
-                } else {
-                    addrs = cached_addrs.unwrap();
-                }
+                };
+
+                let addrs: &mut CachedAddrs = cache.get_mut(&filter).expect("Cache should have some entries");
+
+                if addrs.shuffle_timestamp.elapsed() > time::Duration::from_secs(5) {
+                    // Shuffle cache in place
+                    let mut rng = thread_rng();
+                    addrs.ipv4.shuffle(&mut rng);
+                    addrs.ipv6.shuffle(&mut rng);
+                    addrs.shuffle_timestamp = time::Instant::now();
+                };
 
                 match question.qtype() {
                     Rtype::A => {
@@ -1065,14 +1072,11 @@ fn dns_thread(sock: UdpSocket, db_conn: Arc<Mutex<rusqlite::Connection>>, seed_n
             }
             let _ = sock.send_to(res.into_message().as_slice(), from);
 
-            return Ok(());
+            Ok(())
         })();
 
-        match ret {
-            Err(e) => {
-                println!("{}", e);
-            },
-            _ => ()
+        if let Err(e) = ret {
+            println!("{}", e);
         }
     }
 }
@@ -1095,7 +1099,7 @@ fn main() {
     let mut onion_proxy = Some(&args.onion_proxy);
     let onion_proxy_check = TcpStream::connect_timeout(&SocketAddr::from_str(&args.onion_proxy).unwrap(), time::Duration::from_secs(10));
     if onion_proxy_check.is_ok() {
-        if socks5_connect(&onion_proxy_check.as_ref().unwrap(), &"duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion".to_string(), 80).is_err() {
+        if socks5_connect(onion_proxy_check.as_ref().unwrap(), &"duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion".to_string(), 80).is_err() {
             onion_proxy = None;
         }
         onion_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
@@ -1111,7 +1115,7 @@ fn main() {
     let mut i2p_proxy = Some(&args.i2p_proxy);
     let i2p_proxy_check = TcpStream::connect_timeout(&SocketAddr::from_str(&args.i2p_proxy).unwrap(), time::Duration::from_secs(10));
     if i2p_proxy_check.is_ok() {
-        if socks5_connect(&i2p_proxy_check.as_ref().unwrap(), &"gqt2klvr6r2hpdfxzt4bn2awwehsnc7l5w22fj3enbauxkhnzcoq.b32.i2p".to_string(), 80).is_err() {
+        if socks5_connect(i2p_proxy_check.as_ref().unwrap(), &"gqt2klvr6r2hpdfxzt4bn2awwehsnc7l5w22fj3enbauxkhnzcoq.b32.i2p".to_string(), 80).is_err() {
             i2p_proxy = None;
             println!("I2P proxy couldn't connect to test server");
         }
@@ -1129,7 +1133,7 @@ fn main() {
     let sock = UdpSocket::bind((args.address, args.port)).unwrap();
 
     let net_status = NetStatus {
-        chain: chain.clone(),
+        chain,
         ipv4: args.ipv4_reachable,
         ipv6: args.ipv4_reachable,
         cjdns: args.cjdns_reachable,
@@ -1142,7 +1146,7 @@ fn main() {
         let locked_db_conn = db_conn.lock().unwrap();
         locked_db_conn.busy_handler(Some(|_| {
             thread::sleep(time::Duration::from_secs(1));
-            return true;
+            true
         })).unwrap();
         locked_db_conn.execute(
             "CREATE TABLE if NOT EXISTS 'nodes' (
