@@ -955,7 +955,7 @@ fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &So
 fn dns_thread(
     sock: UdpSocket,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
-    seed_name: &String,
+    seed_name: &str,
     chain: &Network,
 ) {
     #[allow(clippy::single_char_pattern)]
@@ -1041,7 +1041,7 @@ fn dns_thread(
                         continue;
                     }
                     let filter_label = name.first().to_string();
-                    if !filter_label.starts_with("x") || filter_label.starts_with("x0") {
+                    if !filter_label.starts_with('x') || filter_label.starts_with("x0") {
                         send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                         continue;
                     }
