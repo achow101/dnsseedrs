@@ -1,0 +1,46 @@
+permissions:
+  contents: read
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+name: check
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: format
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: build
+        run: cargo build --release --all-features
+  fmt:
+    runs-on: ubuntu-latest
+    name: format
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: fmt --check
+        run: cargo fmt --check
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: clippy
+        run: cargo clippy --all-targets --all-features
+        env:
+          RUSTFLAGS: "-Dwarnings"
+  doc:
+    runs-on: ubuntu-latest
+    name: doc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: cargo doc
+        run: cargo doc --no-deps --all-features
