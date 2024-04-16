@@ -16,13 +16,17 @@ use domain::base::name::Dname;
 use domain::base::record::{Record, Ttl};
 use domain::rdata::aaaa::Aaaa;
 use domain::rdata::rfc1035::A;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -884,9 +888,11 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
                 .collect();
         }
 
-        let mut f = File::create(dump_file).unwrap();
+        let txt_tmp_path = format!("{}.tmp", dump_file);
+        let mut txt_tmp_file = File::create(&txt_tmp_path).unwrap();
+        println!("Writing txt to temporary file {}", &txt_tmp_path);
         writeln!(
-            f,
+            txt_tmp_file,
             "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}user_agent",
             "# address",
             "good",
@@ -902,7 +908,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
         )
         .unwrap();
         for node in nodes {
-            writeln!(f,
+            writeln!(txt_tmp_file,
                 "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}",
                 node.addr.to_string(),
                 i32::from(is_good(&node, chain)),
@@ -918,6 +924,31 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
                 node.user_agent,
             ).unwrap();
         }
+        println!("Renaming {} to {}", txt_tmp_path, dump_file);
+        fs::rename(txt_tmp_path.clone(), dump_file).unwrap();
+
+        // Compress with gz
+        let gz_tmp_path = format!("{}.gz.tmp", dump_file);
+        println!("Writing gz to temporary file {}", gz_tmp_path);
+        let gz_tmp_file = File::create(&gz_tmp_path).unwrap();
+        let mut enc = GzEncoder::new(gz_tmp_file, Compression::default());
+        let f = File::open(dump_file).unwrap();
+        let mut reader = BufReader::new(f);
+
+        let mut buffer = [0; 1024 * 256];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(count) => enc.write_all(&buffer[..count]).unwrap(),
+                Err(e) => panic!("Failed to read from file: {}", e),
+            }
+        }
+        enc.finish().unwrap();
+
+        let gz_path = format!("{}.gz", dump_file);
+        let archive_path = Path::new(&gz_path);
+        println!("Renaming {} to {:?}", gz_tmp_path, archive_path);
+        fs::rename(gz_tmp_path, archive_path).unwrap();
     }
 }
 
