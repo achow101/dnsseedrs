@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 base32ct = { version = "0.2.0", features = ["alloc"] }
-bitcoin = "0.31.1"
+bitcoin = "0.32.0"
 clap = { version = "4.5.1", features = ["derive"] }
 crossbeam = "0.8.4"
 domain = "0.9.3"
@@ -17,6 +17,3 @@ rusqlite = "0.31.0"
 sha3 = "0.10.8"
 tar = "0.4.40"
 threadpool = "1.8.1"
-
-[patch.crates-io]
-bitcoin = { git = "https://github.com/achow101/rust-bitcoin", branch = "0.31.x-p2p_v2_service_flag" }
