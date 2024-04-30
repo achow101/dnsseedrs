@@ -909,7 +909,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
         .unwrap();
         for node in nodes {
             writeln!(txt_tmp_file,
-                "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}{}",
+                "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}\"{}\"",
                 node.addr.to_string(),
                 i32::from(is_good(&node, chain)),
                 node.last_seen,
