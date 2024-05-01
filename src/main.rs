@@ -1201,7 +1201,7 @@ fn dns_thread(
                                 break;
                             }
                             let rec =
-                                Record::new(name, Class::In, Ttl::from_secs(30), A::new(*node));
+                                Record::new(name, Class::In, Ttl::from_secs(60), A::new(*node));
                             res.push(rec).unwrap();
                         }
                     }
@@ -1211,7 +1211,7 @@ fn dns_thread(
                                 break;
                             }
                             let rec =
-                                Record::new(name, Class::In, Ttl::from_secs(30), Aaaa::new(*node));
+                                Record::new(name, Class::In, Ttl::from_secs(60), Aaaa::new(*node));
                             res.push(rec).unwrap();
                         }
                     }
