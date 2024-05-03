@@ -108,13 +108,13 @@ The DNS server will select a set of 20 random "good" addresses to serve. The
 
 #### Caching
 
-The server caches the addresse the return for 10 minutes. If the cache is more
+The server caches the returned addresses for 10 minutes. If the cache is more
 than 10 minutes old, the database is requeried. Otherwise, all queries in a ten
 minute window will receive the same response.
 
 #### TTL
 
-Returned records use a TTL of 30 seconds.
+Returned records use a TTL of 60 seconds.
 
 ## License
 
