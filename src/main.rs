@@ -14,8 +14,9 @@ use domain::base::message::Message;
 use domain::base::message_builder::MessageBuilder;
 use domain::base::name::Dname;
 use domain::base::record::{Record, Ttl};
+use domain::base::serial::Serial;
 use domain::rdata::aaaa::Aaaa;
-use domain::rdata::rfc1035::A;
+use domain::rdata::rfc1035::{Soa, A};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use rand::seq::SliceRandom;
@@ -77,6 +78,10 @@ struct Args {
 
     #[arg()]
     server_name: String,
+
+    /// The exact string to place in the rname field of the SOA record
+    #[arg()]
+    soa_rname: String,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -987,11 +992,13 @@ fn dns_thread(
     sock: UdpSocket,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
     seed_name: &str,
+    soa_rname: &str,
     chain: &Network,
 ) {
     #[allow(clippy::single_char_pattern)]
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
     let seed_dname: Dname<Vec<u8>> = Dname::from_str(seed_name).unwrap();
+    let soa_rname_dname: Dname<Vec<u8>> = Dname::from_str(soa_rname).unwrap();
 
     let allowed_filters = HashSet::from([
         ServiceFlags::NETWORK,                         // x1
@@ -1098,6 +1105,26 @@ fn dns_thread(
                         send_dns_failed(&sock, req, Rcode::NotImp, &from);
                         continue;
                     }
+                };
+
+                // Handle SOA separately
+                if question.qtype() == Rtype::Soa {
+                    let rec = Record::new(
+                        name,
+                        Class::In,
+                        Ttl::from_secs(900),
+                        Soa::new(
+                            &seed_dname,
+                            &soa_rname_dname,
+                            Serial(1),
+                            Ttl::from_secs(3600),
+                            Ttl::from_secs(3600),
+                            Ttl::from_secs(86400),
+                            Ttl::from_secs(60),
+                        ),
+                    );
+                    res.push(rec).unwrap();
+                    continue;
                 };
 
                 // Check supported record type
@@ -1365,7 +1392,7 @@ fn main() {
     // Start DNS thread
     let db_conn_c3 = db_conn.clone();
     let t_dns = thread::spawn(move || {
-        dns_thread(sock, db_conn_c3, &args.server_name, &chain);
+        dns_thread(sock, db_conn_c3, &args.server_name, &args.soa_rname, &chain);
     });
 
     // Watchdog, exit if any main thread has died

@@ -5,10 +5,11 @@ A Bitcoin DNS Seeder written in Rust.
 ## Usage
 
 ```
-Usage: dnsseedrs [OPTIONS] <SERVER_NAME>
+Usage: dnsseedrs [OPTIONS] <SERVER_NAME> <SOA_RNAME>
 
 Arguments:
   <SERVER_NAME>  
+  <SOA_RNAME>    The exact string to place in the rname field of the SOA record
 
 Options:
   -s, --seednode <SEEDNODE>        
