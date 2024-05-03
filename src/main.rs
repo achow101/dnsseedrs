@@ -76,6 +76,11 @@ struct Args {
     #[arg(long, default_value = "main")]
     chain: String,
 
+    /// The domain name for which this server will return results for
+    #[arg()]
+    seed_domain: String,
+
+    /// The domain name of this server itself, i.e. what the NS record will point to
     #[arg()]
     server_name: String,
 
@@ -991,13 +996,15 @@ fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &So
 fn dns_thread(
     sock: UdpSocket,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
-    seed_name: &str,
+    seed_domain: &str,
+    server_name: &str,
     soa_rname: &str,
     chain: &Network,
 ) {
     #[allow(clippy::single_char_pattern)]
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
-    let seed_dname: Dname<Vec<u8>> = Dname::from_str(seed_name).unwrap();
+    let seed_domain_dname: Dname<Vec<u8>> = Dname::from_str(seed_domain).unwrap();
+    let server_dname: Dname<Vec<u8>> = Dname::from_str(server_name).unwrap();
     let soa_rname_dname: Dname<Vec<u8>> = Dname::from_str(soa_rname).unwrap();
 
     let allowed_filters = HashSet::from([
@@ -1066,15 +1073,15 @@ fn dns_thread(
                 let name = question.qname();
 
                 // Make sure we can serve this
-                if !name.ends_with(&seed_dname) {
+                if !name.ends_with(&seed_domain_dname) {
                     send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                     continue;
                 }
 
                 // Check for xNNN.<name> service flag filter
                 let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-                if name.label_count() != seed_dname.label_count() {
-                    if name.label_count() != seed_dname.label_count() + 1 {
+                if name.label_count() != seed_domain_dname.label_count() {
+                    if name.label_count() != seed_domain_dname.label_count() + 1 {
                         send_dns_failed(&sock, req, Rcode::NXDomain, &from);
                         continue;
                     }
@@ -1114,7 +1121,7 @@ fn dns_thread(
                         Class::In,
                         Ttl::from_secs(900),
                         Soa::new(
-                            &seed_dname,
+                            &server_dname,
                             &soa_rname_dname,
                             Serial(1),
                             Ttl::from_secs(3600),
@@ -1392,7 +1399,14 @@ fn main() {
     // Start DNS thread
     let db_conn_c3 = db_conn.clone();
     let t_dns = thread::spawn(move || {
-        dns_thread(sock, db_conn_c3, &args.server_name, &args.soa_rname, &chain);
+        dns_thread(
+            sock,
+            db_conn_c3,
+            &args.seed_domain,
+            &args.server_name,
+            &args.soa_rname,
+            &chain,
+        );
     });
 
     // Watchdog, exit if any main thread has died
