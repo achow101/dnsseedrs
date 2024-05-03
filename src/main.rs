@@ -982,13 +982,23 @@ impl CachedAddrs {
 
 fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &SocketAddr) {
     let res_builder = MessageBuilder::new_vec();
-    let res = res_builder.start_answer(req, code);
-    match res.is_ok() {
-        true => {
-            let _ = sock.send_to(res.unwrap().into_message().as_slice(), from);
-        }
-        false => {
-            println!("Failed to send DNS error: {}", res.unwrap_err());
+    match res_builder.start_answer(req, code) {
+        Ok(res) => match req.opt() {
+            Some(..) => {
+                let mut addl = res.additional();
+                addl.opt(|opt| {
+                    opt.set_rcode(code.into());
+                    Ok(())
+                })
+                .unwrap();
+                let _ = sock.send_to(addl.into_message().as_slice(), from);
+            }
+            None => {
+                let _ = sock.send_to(res.into_message().as_slice(), from);
+            }
+        },
+        Err(e) => {
+            println!("Failed to send DNS error: {}", e);
         }
     }
 }
@@ -1254,7 +1264,23 @@ fn dns_thread(
                     }
                 };
             }
-            let _ = sock.send_to(res.into_message().as_slice(), from);
+
+            // Add OPT to our response if it is there
+            // And send
+            match req.opt() {
+                Some(..) => {
+                    let mut addl = res.additional();
+                    addl.opt(|opt| {
+                        opt.set_rcode(Rcode::NoError.into());
+                        Ok(())
+                    })
+                    .unwrap();
+                    let _ = sock.send_to(addl.into_message().as_slice(), from);
+                }
+                None => {
+                    let _ = sock.send_to(res.into_message().as_slice(), from);
+                }
+            }
 
             Ok(())
         })();
