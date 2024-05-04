@@ -1,4 +1,5 @@
 use base32ct::{Base32Unpadded, Encoding};
+use base64ct::{Base64, Encoding as B64Encoding};
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::network::Network;
 use bitcoin::p2p::address::{AddrV2, Address};
@@ -7,6 +8,7 @@ use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use clap::Parser;
 use crossbeam::queue::ArrayQueue;
+use domain::base::iana::SecAlg;
 use domain::base::iana::rcode::Rcode;
 use domain::base::iana::rtype::Rtype;
 use domain::base::iana::Class;
@@ -16,6 +18,7 @@ use domain::base::name::Dname;
 use domain::base::record::{Record, Ttl};
 use domain::base::serial::Serial;
 use domain::rdata::aaaa::Aaaa;
+use domain::rdata::dnssec::Dnskey;
 use domain::rdata::rfc1035::{Ns, Soa, A};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -25,7 +28,7 @@ use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufRead, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::Path;
 use std::str::FromStr;
@@ -76,6 +79,10 @@ struct Args {
     #[arg(long, default_value = "main")]
     chain: String,
 
+    /// The path to a directory containing DNSSEC keys produced by dnssec-keygen
+    #[arg(long)]
+    dnssec_keys: Option<String>,
+
     /// The domain name for which this server will return results for
     #[arg()]
     seed_domain: String,
@@ -105,7 +112,7 @@ struct NodeAddress {
     port: u16,
 }
 
-impl std::fmt::Display for NodeAddress{
+impl std::fmt::Display for NodeAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.host {
             Host::Ipv4(ip) => write!(f, "{}:{}", ip, self.port),
@@ -1062,6 +1069,7 @@ fn dns_thread(
     server_name: &str,
     soa_rname: &str,
     chain: &Network,
+    dnssec_keys: Option<String>,
 ) {
     #[allow(clippy::single_char_pattern)]
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
@@ -1091,6 +1099,68 @@ fn dns_thread(
             | ServiceFlags::COMPACT_FILTERS, // xc48
         ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM,  // x40c
     ]);
+
+    // Read the DNSSEC keys
+    let mut dnskey_recs = Vec::<Dnskey<Vec<u8>>>::new();
+    let mut dns_keys = Vec::<Vec<u8>>::new();
+    if dnssec_keys.is_some() {
+        let fname_prefix = format!("K{}", seed_domain);
+        println!("{}", &fname_prefix);
+        for entry in fs::read_dir(Path::new(&dnssec_keys.unwrap())).unwrap() {
+            let fname = entry.as_ref().unwrap().file_name().into_string().unwrap();
+            if !fname.starts_with(&fname_prefix) || !fname.ends_with(".key") {
+                continue;
+            }
+
+            // Make sure there's a corresponding private key
+            let privkey_fname = entry.as_ref().unwrap().path().with_extension("private");
+            if !privkey_fname.is_file() {
+                continue;
+            }
+
+            // Parse the public key file
+            let pubkey_file = File::open(entry.unwrap().path()).unwrap();
+            let pubkey_reader = BufReader::new(pubkey_file);
+            let mut algo = SecAlg::from_int(0);
+            for l in pubkey_reader.lines() {
+                let line = l.unwrap();
+                if line.starts_with(";") {
+                    continue;
+                }
+                let line_split: Vec<&str> = line.splitn(7, ' ').collect();
+                if !line_split[0].eq(&format!("{}.", seed_domain))
+                    || !line_split[1].eq("IN")
+                    || !line_split[2].eq("DNSKEY")
+                {
+                    continue;
+                }
+                algo = SecAlg::from_int(u8::from_str(line_split[5]).unwrap());
+                dnskey_recs.push(Dnskey::<Vec<u8>>::new(
+                    u16::from_str(line_split[3]).unwrap(),
+                    u8::from_str(line_split[4]).unwrap(),
+                    algo,
+                    Base64::decode_vec(&line_split[6].replace(" ", "")).unwrap()
+                ).unwrap());
+            }
+
+            // Parse the private key file
+            let privkey_file = File::open(privkey_fname).unwrap();
+            let privkey_reader = BufReader::new(privkey_file);
+            let mut lines = privkey_reader.lines();
+            let mut line = lines.next().unwrap().unwrap();
+            if !line.eq("Private-key-format: v1.3") {
+                continue;
+            }
+            line = lines.next().unwrap().unwrap();
+            let priv_algo = SecAlg::from_int(u8::from_str(&line.split(' ').nth(1).unwrap()).unwrap());
+            if algo != priv_algo {
+                continue;
+            }
+            line = lines.next().unwrap().unwrap();
+            dns_keys.push(Base64::decode_vec(line.split(' ').nth(1).unwrap()).unwrap());
+        }
+    }
+    println!("DNSSEC Keys: {} pub, {} priv", dnskey_recs.len(), dns_keys.len());
 
     // Bind socket
     let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
@@ -1392,6 +1462,12 @@ fn main() {
     }
     let chain = chain_p.unwrap();
 
+    // Check that DNSSEC keys directory is a directory
+    if args.dnssec_keys.is_some() && !Path::new(&args.dnssec_keys.as_ref().unwrap()).is_dir() {
+        println!("{} is not a directory", args.dnssec_keys.unwrap());
+        std::process::exit(1);
+    }
+
     let net_status = NetStatus {
         chain,
         ipv4: args.ipv4_reachable,
@@ -1465,6 +1541,7 @@ fn main() {
             &args.server_name,
             &args.soa_rname,
             &chain,
+            args.dnssec_keys,
         );
     });
 
