@@ -14,12 +14,13 @@ use domain::base::iana::Class;
 use domain::base::iana::SecAlg;
 use domain::base::message::Message;
 use domain::base::message_builder::MessageBuilder;
-use domain::base::name::Name;
+use domain::base::name::{Name, ParsedName};
 use domain::base::record::{Record, Ttl};
 use domain::base::serial::Serial;
 use domain::rdata::aaaa::Aaaa;
 use domain::rdata::dnssec::Dnskey;
 use domain::rdata::rfc1035::{Ns, Soa, A};
+use domain::sign::records::SortedRecords;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use rand::seq::SliceRandom;
@@ -1195,6 +1196,12 @@ fn dns_thread(
                 return Err("Received truncated, unsupported".to_string());
             }
 
+            // Track records for signing
+            let mut soa_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, Soa<&Name<Vec<u8>>>>::new();
+            let mut a_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, A>::new();
+            let mut aaaa_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, Aaaa>::new();
+            let mut ns_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, Ns<&Name<Vec<u8>>>>::new();
+
             // Answer the questions
             let mut res_builder = MessageBuilder::new_vec();
             res_builder.header_mut().set_aa(true);
@@ -1259,7 +1266,7 @@ fn dns_thread(
                 // Handle SOA separately
                 if question.qtype() == Rtype::SOA {
                     let rec = Record::new(
-                        name,
+                        name.clone(),
                         Class::IN,
                         Ttl::from_secs(900),
                         Soa::new(
@@ -1272,19 +1279,21 @@ fn dns_thread(
                             Ttl::from_secs(60),
                         ),
                     );
-                    res.push(rec).unwrap();
+                    res.push(rec.clone()).unwrap();
+                    let _ = soa_ans_recs_sign.insert(rec);
                     continue;
                 };
 
                 // Handle NS separately
                 if question.qtype() == Rtype::NS {
                     let rec = Record::new(
-                        name,
+                        name.clone(),
                         Class::IN,
                         Ttl::from_secs(86400),
                         Ns::new(&server_dname),
                     );
-                    res.push(rec).unwrap();
+                    res.push(rec.clone()).unwrap();
+                    let _ = ns_ans_recs_sign.insert(rec);
                     continue;
                 };
 
@@ -1388,8 +1397,9 @@ fn dns_thread(
                                 break;
                             }
                             let rec =
-                                Record::new(name, Class::IN, Ttl::from_secs(60), A::new(*node));
-                            res.push(rec).unwrap();
+                                Record::new(name.clone(), Class::IN, Ttl::from_secs(60), A::new(*node));
+                            res.push(rec.clone()).unwrap();
+                            let _ = a_ans_recs_sign.insert(rec);
                         }
                     }
                     Rtype::AAAA => {
@@ -1398,8 +1408,9 @@ fn dns_thread(
                                 break;
                             }
                             let rec =
-                                Record::new(name, Class::IN, Ttl::from_secs(60), Aaaa::new(*node));
-                            res.push(rec).unwrap();
+                                Record::new(name.clone(), Class::IN, Ttl::from_secs(60), Aaaa::new(*node));
+                            res.push(rec.clone()).unwrap();
+                            let _ = aaaa_ans_recs_sign.insert(rec);
                         }
                     }
                     _ => {
@@ -1413,6 +1424,7 @@ fn dns_thread(
 
             // Add SOA to authority section if there are no answers
             if auth.counts().ancount() == 0 {
+                let mut soa_auth_recs_sign = SortedRecords::<&Name<Vec<u8>>, Soa<&Name<Vec<u8>>>>::new();
                 let rec = Record::new(
                     &server_dname,
                     Class::IN,
@@ -1427,7 +1439,8 @@ fn dns_thread(
                         Ttl::from_secs(60),
                     ),
                 );
-                auth.push(rec).unwrap();
+                auth.push(rec.clone()).unwrap();
+                let _ = soa_auth_recs_sign.insert(rec);
             }
 
             // Advance to additional section
