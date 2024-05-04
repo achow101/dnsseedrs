@@ -1387,6 +1387,7 @@ fn main() {
         Ok(Network::Bitcoin) | Ok(Network::Testnet) | Ok(Network::Signet) => (),
         _ => {
             println!("Unsupported network type: {}", args.chain);
+            std::process::exit(1);
         }
     }
     let chain = chain_p.unwrap();
