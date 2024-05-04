@@ -1331,8 +1331,8 @@ fn dns_thread(
                             for rrsig in soa_auth_recs_sign
                                 .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                                     &apex_name,
-                                    incep_ts,
                                     exp_ts,
+                                    incep_ts,
                                     key.unwrap(),
                                 )
                                 .unwrap()
@@ -1394,8 +1394,8 @@ fn dns_thread(
                             for rrsig in nsec_auth_recs_sign
                                 .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                                     &apex_name,
-                                    incep_ts,
                                     exp_ts,
+                                    incep_ts,
                                     key.unwrap(),
                                 )
                                 .unwrap()
@@ -1698,8 +1698,8 @@ fn dns_thread(
                     for rrsig in soa_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                             &apex_name,
-                            incep_ts,
                             exp_ts,
+                            incep_ts,
                             key.unwrap(),
                         )
                         .unwrap()
@@ -1709,8 +1709,8 @@ fn dns_thread(
                     for rrsig in a_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                             &apex_name,
-                            incep_ts,
                             exp_ts,
+                            incep_ts,
                             key.unwrap(),
                         )
                         .unwrap()
@@ -1720,8 +1720,8 @@ fn dns_thread(
                     for rrsig in aaaa_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                             &apex_name,
-                            incep_ts,
                             exp_ts,
+                            incep_ts,
                             key.unwrap(),
                         )
                         .unwrap()
@@ -1731,8 +1731,8 @@ fn dns_thread(
                     for rrsig in ns_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                             &apex_name,
-                            incep_ts,
                             exp_ts,
+                            incep_ts,
                             key.unwrap(),
                         )
                         .unwrap()
@@ -1750,8 +1750,8 @@ fn dns_thread(
                     for rrsig in dnskey_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                             &apex_name,
-                            incep_ts,
                             exp_ts,
+                            incep_ts,
                             key.unwrap(),
                         )
                         .unwrap()
@@ -1798,8 +1798,8 @@ fn dns_thread(
                         for rrsig in soa_auth_recs_sign
                             .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
                                 &apex_name,
-                                incep_ts,
                                 exp_ts,
+                                incep_ts,
                                 key.unwrap(),
                             )
                             .unwrap()
