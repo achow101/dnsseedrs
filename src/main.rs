@@ -1661,12 +1661,8 @@ fn dns_thread(
                             if i >= 20 {
                                 break;
                             }
-                            let rec = Record::new(
-                                *name,
-                                Class::IN,
-                                Ttl::from_secs(60),
-                                A::new(*node),
-                            );
+                            let rec =
+                                Record::new(*name, Class::IN, Ttl::from_secs(60), A::new(*node));
                             res.push(rec.clone()).unwrap();
                             let _ = a_ans_recs_sign.insert(rec);
                         }
@@ -1676,12 +1672,8 @@ fn dns_thread(
                             if i >= 20 {
                                 break;
                             }
-                            let rec = Record::new(
-                                *name,
-                                Class::IN,
-                                Ttl::from_secs(60),
-                                Aaaa::new(*node),
-                            );
+                            let rec =
+                                Record::new(*name, Class::IN, Ttl::from_secs(60), Aaaa::new(*node));
                             res.push(rec.clone()).unwrap();
                             let _ = aaaa_ans_recs_sign.insert(rec);
                         }
