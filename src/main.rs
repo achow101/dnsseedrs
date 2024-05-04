@@ -1148,28 +1148,59 @@ fn dns_thread(
     let server_dname: Name<Vec<u8>> = Name::from_str(server_name).unwrap();
     let soa_rname_dname: Name<Vec<u8>> = Name::from_str(soa_rname).unwrap();
 
-    let allowed_filters = HashSet::from([
-        ServiceFlags::NETWORK,                         // x1
-        ServiceFlags::NETWORK | ServiceFlags::BLOOM,   // x5
-        ServiceFlags::NETWORK | ServiceFlags::WITNESS, // x9
-        ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS, // x49
-        ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2, // x809
-        ServiceFlags::NETWORK
-            | ServiceFlags::WITNESS
-            | ServiceFlags::P2P_V2
-            | ServiceFlags::COMPACT_FILTERS, //x849
-        ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::BLOOM, // xd
-        ServiceFlags::NETWORK_LIMITED,                 // x400
-        ServiceFlags::NETWORK_LIMITED | ServiceFlags::BLOOM, // x404
-        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS, // x408
-        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS, // x448
-        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2, // xc08
-        ServiceFlags::NETWORK_LIMITED
-            | ServiceFlags::WITNESS
-            | ServiceFlags::P2P_V2
-            | ServiceFlags::COMPACT_FILTERS, // xc48
-        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM,  // x40c
+    // Fixed table of allowed filters
+    let allowed_filters: HashMap<String, ServiceFlags> = HashMap::from([
+        ("x1".to_string(), ServiceFlags::NETWORK),
+        ("x5".to_string(), ServiceFlags::NETWORK | ServiceFlags::BLOOM),
+        ("x9".to_string(), ServiceFlags::NETWORK | ServiceFlags::WITNESS),
+        (
+            "x49".to_string(),
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
+        ),
+        (
+            "x809".to_string(),
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+        ),
+        (
+            "x849".to_string(),
+            ServiceFlags::NETWORK
+                | ServiceFlags::WITNESS
+                | ServiceFlags::P2P_V2
+                | ServiceFlags::COMPACT_FILTERS,
+        ),
+        (
+            "xd".to_string(),
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::BLOOM,
+        ),
+        ("x400".to_string(), ServiceFlags::NETWORK_LIMITED),
+        ("x404".to_string(), ServiceFlags::NETWORK_LIMITED | ServiceFlags::BLOOM),
+        (
+            "x408".to_string(),
+            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS,
+        ),
+        (
+            "x448".to_string(),
+            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
+        ),
+        (
+            "xc08".to_string(),
+            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+        ),
+        (
+            "xc48".to_string(),
+            ServiceFlags::NETWORK_LIMITED
+                | ServiceFlags::WITNESS
+                | ServiceFlags::P2P_V2
+                | ServiceFlags::COMPACT_FILTERS,
+        ),
+        (
+            "x40c".to_string(),
+            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM,
+        ),
     ]);
+
+    // Compute the canonical ordering of served names
+
 
     // Read the DNSSEC keys
     // dnskeys map: (flags, algo) -> keypair
@@ -1296,7 +1327,7 @@ fn dns_thread(
 
                 // Make sure we can serve this
                 if !name.ends_with(&seed_domain_dname) {
-                    send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
+                    send_dns_failed(&sock, req, Rcode::REFUSED, &from);
                     continue;
                 }
 
@@ -1308,23 +1339,12 @@ fn dns_thread(
                         continue;
                     }
                     let filter_label = name.first().to_string();
-                    if !filter_label.starts_with('x') || filter_label.starts_with("x0") {
+                    let this_filter = allowed_filters.get(&filter_label);
+                    if this_filter.is_none() {
                         send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
                         continue;
                     }
-                    match u64::from_str_radix(&filter_label[1..], 16) {
-                        Ok(f) => {
-                            filter = ServiceFlags::from(f);
-                        }
-                        Err(..) => {
-                            send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
-                            continue;
-                        }
-                    }
-                    if !allowed_filters.contains(&filter) {
-                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
-                        continue;
-                    }
+                    filter = *this_filter.unwrap();
                 }
 
                 // Check supported class
