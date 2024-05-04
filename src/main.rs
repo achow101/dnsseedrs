@@ -278,7 +278,7 @@ impl SigningKey for DnsSigningKey {
     }
 
     fn ds<N: ToName>(&self, _owner: N) -> Result<Ds<Self::Octets>, Self::Error> {
-        return Err(Unspecified);
+        Err(Unspecified)
     }
 
     fn sign(&self, msg: &[u8]) -> Result<Self::Signature, Self::Error> {
@@ -1111,6 +1111,7 @@ impl CachedAddrs {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dns_thread(
     bind_addr: &str,
     bind_port: u16,
@@ -1231,7 +1232,7 @@ fn dns_thread(
                 flags,
                 u8::from_str(pubkey_line_split[4]).unwrap(),
                 algo,
-                Base64::decode_vec(&pubkey_line_split[6].replace(" ", "")).unwrap(),
+                Base64::decode_vec(&pubkey_line_split[6].replace(' ', "")).unwrap(),
             )
             .unwrap();
 
@@ -1245,7 +1246,7 @@ fn dns_thread(
             }
             line = lines.next().unwrap().unwrap();
             let priv_algo =
-                SecAlg::from_int(u8::from_str(&line.split(' ').nth(1).unwrap()).unwrap());
+                SecAlg::from_int(u8::from_str(line.split(' ').nth(1).unwrap()).unwrap());
             if algo != priv_algo {
                 continue;
             }
@@ -1514,7 +1515,7 @@ fn dns_thread(
                 // Handle SOA separately
                 if question.qtype() == Rtype::SOA {
                     let rec = Record::new(
-                        name.clone(),
+                        *name,
                         Class::IN,
                         Ttl::from_secs(900),
                         Soa::new(
@@ -1535,7 +1536,7 @@ fn dns_thread(
                 // Handle NS separately
                 if question.qtype() == Rtype::NS {
                     let rec = Record::new(
-                        name.clone(),
+                        *name,
                         Class::IN,
                         Ttl::from_secs(86400),
                         Ns::new(&server_dname),
@@ -1549,7 +1550,7 @@ fn dns_thread(
                 if question.qtype() == Rtype::DNSKEY {
                     for dnskey in dnskeys.values() {
                         let rec = Record::new(
-                            name.clone(),
+                            *name,
                             Class::IN,
                             Ttl::from_secs(3600),
                             dnskey.dnskey().unwrap(),
@@ -1661,7 +1662,7 @@ fn dns_thread(
                                 break;
                             }
                             let rec = Record::new(
-                                name.clone(),
+                                *name,
                                 Class::IN,
                                 Ttl::from_secs(60),
                                 A::new(*node),
@@ -1676,7 +1677,7 @@ fn dns_thread(
                                 break;
                             }
                             let rec = Record::new(
-                                name.clone(),
+                                *name,
                                 Class::IN,
                                 Ttl::from_secs(60),
                                 Aaaa::new(*node),
