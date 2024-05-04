@@ -8,10 +8,10 @@ use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use clap::Parser;
 use crossbeam::queue::ArrayQueue;
-use domain::base::iana::SecAlg;
 use domain::base::iana::rcode::Rcode;
 use domain::base::iana::rtype::Rtype;
 use domain::base::iana::Class;
+use domain::base::iana::SecAlg;
 use domain::base::message::Message;
 use domain::base::message_builder::MessageBuilder;
 use domain::base::name::Dname;
@@ -28,7 +28,7 @@ use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, BufRead, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::path::Path;
 use std::str::FromStr;
@@ -1101,8 +1101,8 @@ fn dns_thread(
     ]);
 
     // Read the DNSSEC keys
-    let mut dnskey_recs = Vec::<Dnskey<Vec<u8>>>::new();
-    let mut dns_keys = Vec::<Vec<u8>>::new();
+    // dnskeys map: flags -> {algo -> (pubkey, privkey)}
+    let mut dnskeys = HashMap::<u16, HashMap<SecAlg, (Dnskey<Vec<u8>>, Vec<u8>)>>::new();
     if dnssec_keys.is_some() {
         let fname_prefix = format!("K{}", seed_domain);
         println!("{}", &fname_prefix);
@@ -1121,27 +1121,23 @@ fn dns_thread(
             // Parse the public key file
             let pubkey_file = File::open(entry.unwrap().path()).unwrap();
             let pubkey_reader = BufReader::new(pubkey_file);
-            let mut algo = SecAlg::from_int(0);
-            for l in pubkey_reader.lines() {
-                let line = l.unwrap();
-                if line.starts_with(";") {
-                    continue;
-                }
-                let line_split: Vec<&str> = line.splitn(7, ' ').collect();
-                if !line_split[0].eq(&format!("{}.", seed_domain))
-                    || !line_split[1].eq("IN")
-                    || !line_split[2].eq("DNSKEY")
-                {
-                    continue;
-                }
-                algo = SecAlg::from_int(u8::from_str(line_split[5]).unwrap());
-                dnskey_recs.push(Dnskey::<Vec<u8>>::new(
-                    u16::from_str(line_split[3]).unwrap(),
-                    u8::from_str(line_split[4]).unwrap(),
-                    algo,
-                    Base64::decode_vec(&line_split[6].replace(" ", "")).unwrap()
-                ).unwrap());
+            let pubkey_line = pubkey_reader.lines().last().unwrap().unwrap();
+            let pubkey_line_split: Vec<&str> = pubkey_line.splitn(7, ' ').collect();
+            if !pubkey_line_split[0].eq(&format!("{}.", seed_domain))
+                || !pubkey_line_split[1].eq("IN")
+                || !pubkey_line_split[2].eq("DNSKEY")
+            {
+                continue;
             }
+            let flags = u16::from_str(pubkey_line_split[3]).unwrap();
+            let algo = SecAlg::from_int(u8::from_str(pubkey_line_split[5]).unwrap());
+            let pubkey = Dnskey::<Vec<u8>>::new(
+                flags,
+                u8::from_str(pubkey_line_split[4]).unwrap(),
+                algo,
+                Base64::decode_vec(&pubkey_line_split[6].replace(" ", "")).unwrap(),
+            )
+            .unwrap();
 
             // Parse the private key file
             let privkey_file = File::open(privkey_fname).unwrap();
@@ -1152,15 +1148,25 @@ fn dns_thread(
                 continue;
             }
             line = lines.next().unwrap().unwrap();
-            let priv_algo = SecAlg::from_int(u8::from_str(&line.split(' ').nth(1).unwrap()).unwrap());
+            let priv_algo =
+                SecAlg::from_int(u8::from_str(&line.split(' ').nth(1).unwrap()).unwrap());
             if algo != priv_algo {
                 continue;
             }
             line = lines.next().unwrap().unwrap();
-            dns_keys.push(Base64::decode_vec(line.split(' ').nth(1).unwrap()).unwrap());
+            let privkey = Base64::decode_vec(line.split(' ').nth(1).unwrap()).unwrap();
+
+            if !dnskeys.contains_key(&flags) {
+                dnskeys.insert(flags, HashMap::<SecAlg, (Dnskey<Vec<u8>>, Vec<u8>)>::new());
+            }
+            let flags_keys = dnskeys.get_mut(&flags).unwrap();
+            if flags_keys.contains_key(&algo) {
+                // We already have a key for this flags and algo, skip
+                continue;
+            }
+            flags_keys.insert(algo, (pubkey, privkey));
         }
     }
-    println!("DNSSEC Keys: {} pub, {} priv", dnskey_recs.len(), dns_keys.len());
 
     // Bind socket
     let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
