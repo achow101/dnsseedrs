@@ -1636,24 +1636,27 @@ fn dns_thread(
                 auth.push(rec.clone()).unwrap();
                 let _ = soa_auth_recs_sign.insert(rec);
 
-                // Sign it
-                let incep_ts = Timestamp::now();
-                let exp_ts = Timestamp::from(Timestamp::now().into_int().overflowing_add(86400).0);
-                for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                    let key = dnskeys.get(&(256, algo));
-                    if key.is_none() {
-                        continue;
-                    }
-                    for rrsig in soa_auth_recs_sign
-                        .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &apex_name,
-                            incep_ts,
-                            exp_ts,
-                            key.unwrap(),
-                        )
-                        .unwrap()
-                    {
-                        let _ = auth.push(rrsig);
+                if req.opt().is_some() && req.opt().unwrap().dnssec_ok() {
+                    // Sign it
+                    let incep_ts = Timestamp::now();
+                    let exp_ts =
+                        Timestamp::from(Timestamp::now().into_int().overflowing_add(86400).0);
+                    for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
+                        let key = dnskeys.get(&(256, algo));
+                        if key.is_none() {
+                            continue;
+                        }
+                        for rrsig in soa_auth_recs_sign
+                            .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
+                                &apex_name,
+                                incep_ts,
+                                exp_ts,
+                                key.unwrap(),
+                            )
+                            .unwrap()
+                        {
+                            let _ = auth.push(rrsig);
+                        }
                     }
                 }
             }
