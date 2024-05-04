@@ -674,8 +674,59 @@ fn is_good(node: &NodeInfo, chain: &Network) -> bool {
 fn crawler_thread(
     db_conn: Arc<Mutex<rusqlite::Connection>>,
     threads: usize,
-    net_status: NetStatus,
+    mut net_status: NetStatus,
 ) {
+    // Check proxies
+    println!("Checking onion proxy");
+    let onion_proxy_check = TcpStream::connect_timeout(
+        &SocketAddr::from_str(&net_status.onion_proxy.as_ref().unwrap()).unwrap(),
+        time::Duration::from_secs(10),
+    );
+    if onion_proxy_check.is_ok() {
+        if socks5_connect(
+            onion_proxy_check.as_ref().unwrap(),
+            &"duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion".to_string(),
+            80,
+        )
+        .is_err()
+        {
+            net_status.onion_proxy = None;
+        }
+        onion_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
+    } else {
+        net_status.onion_proxy = None;
+    }
+    match net_status.onion_proxy {
+        Some(..) => println!("Onion proxy good"),
+        None => println!("Onion proxy bad"),
+    }
+
+    println!("Checking I2P proxy");
+    let i2p_proxy_check = TcpStream::connect_timeout(
+        &SocketAddr::from_str(&net_status.i2p_proxy.as_ref().unwrap()).unwrap(),
+        time::Duration::from_secs(10),
+    );
+    if i2p_proxy_check.is_ok() {
+        if socks5_connect(
+            i2p_proxy_check.as_ref().unwrap(),
+            &"gqt2klvr6r2hpdfxzt4bn2awwehsnc7l5w22fj3enbauxkhnzcoq.b32.i2p".to_string(),
+            80,
+        )
+        .is_err()
+        {
+            net_status.i2p_proxy = None;
+            println!("I2P proxy couldn't connect to test server");
+        }
+        i2p_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
+    } else {
+        println!("I2P proxy didn't connect");
+        net_status.i2p_proxy = None;
+    }
+    match net_status.i2p_proxy {
+        Some(..) => println!("I2P proxy good"),
+        None => println!("I2P proxy bad"),
+    }
+
     // Setup thread pool with one less than specified to account for this thread.
     let pool = ThreadPool::new(threads - 1);
 
@@ -1340,66 +1391,13 @@ fn main() {
     }
     let chain = chain_p.unwrap();
 
-    // Check proxies
-    println!("Checking onion proxy");
-    let mut onion_proxy = Some(&args.onion_proxy);
-    let onion_proxy_check = TcpStream::connect_timeout(
-        &SocketAddr::from_str(&args.onion_proxy).unwrap(),
-        time::Duration::from_secs(10),
-    );
-    if onion_proxy_check.is_ok() {
-        if socks5_connect(
-            onion_proxy_check.as_ref().unwrap(),
-            &"duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion".to_string(),
-            80,
-        )
-        .is_err()
-        {
-            onion_proxy = None;
-        }
-        onion_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
-    } else {
-        onion_proxy = None;
-    }
-    match onion_proxy {
-        Some(..) => println!("Onion proxy good"),
-        None => println!("Onion proxy bad"),
-    }
-
-    println!("Checking I2P proxy");
-    let mut i2p_proxy = Some(&args.i2p_proxy);
-    let i2p_proxy_check = TcpStream::connect_timeout(
-        &SocketAddr::from_str(&args.i2p_proxy).unwrap(),
-        time::Duration::from_secs(10),
-    );
-    if i2p_proxy_check.is_ok() {
-        if socks5_connect(
-            i2p_proxy_check.as_ref().unwrap(),
-            &"gqt2klvr6r2hpdfxzt4bn2awwehsnc7l5w22fj3enbauxkhnzcoq.b32.i2p".to_string(),
-            80,
-        )
-        .is_err()
-        {
-            i2p_proxy = None;
-            println!("I2P proxy couldn't connect to test server");
-        }
-        i2p_proxy_check.unwrap().shutdown(Shutdown::Both).unwrap();
-    } else {
-        println!("I2P proxy didn't connect");
-        i2p_proxy = None;
-    }
-    match i2p_proxy {
-        Some(..) => println!("I2P proxy good"),
-        None => println!("I2P proxy bad"),
-    }
-
     let net_status = NetStatus {
         chain,
         ipv4: args.ipv4_reachable,
         ipv6: args.ipv4_reachable,
         cjdns: args.cjdns_reachable,
-        onion_proxy: onion_proxy.cloned(),
-        i2p_proxy: i2p_proxy.cloned(),
+        onion_proxy: Some(args.onion_proxy),
+        i2p_proxy: Some(args.i2p_proxy),
     };
 
     let db_conn = Arc::new(Mutex::new(
