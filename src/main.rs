@@ -18,8 +18,9 @@ use domain::base::name::{Name, ParsedName, RelativeName, ToName};
 use domain::base::record::{Record, Ttl};
 use domain::base::serial::Serial;
 use domain::base::CanonicalOrd;
+use domain::base::Question;
 use domain::rdata::aaaa::Aaaa;
-use domain::rdata::dnssec::{Dnskey, Ds, Timestamp};
+use domain::rdata::dnssec::{Dnskey, Ds, Nsec, RtypeBitmapBuilder, Timestamp};
 use domain::rdata::rfc1035::{Ns, Soa, A};
 use domain::sign::key::SigningKey;
 use domain::sign::records::{FamilyName, SortedRecords};
@@ -1110,29 +1111,6 @@ impl CachedAddrs {
     }
 }
 
-fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &SocketAddr) {
-    let res_builder = MessageBuilder::new_vec();
-    match res_builder.start_answer(req, code) {
-        Ok(res) => match req.opt() {
-            Some(..) => {
-                let mut addl = res.additional();
-                addl.opt(|opt| {
-                    opt.set_rcode(code.into());
-                    Ok(())
-                })
-                .unwrap();
-                let _ = sock.send_to(addl.into_message().as_slice(), from);
-            }
-            None => {
-                let _ = sock.send_to(res.into_message().as_slice(), from);
-            }
-        },
-        Err(e) => {
-            println!("Failed to send DNS error: {}", e);
-        }
-    }
-}
-
 fn dns_thread(
     bind_addr: &str,
     bind_port: u16,
@@ -1289,6 +1267,167 @@ fn dns_thread(
     let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
     println!("Bound socket");
 
+    let mut apex_rtype_builder = RtypeBitmapBuilder::new_vec();
+    let _ = apex_rtype_builder.add(Rtype::A);
+    let _ = apex_rtype_builder.add(Rtype::AAAA);
+    let _ = apex_rtype_builder.add(Rtype::NS);
+    let _ = apex_rtype_builder.add(Rtype::SOA);
+    let _ = apex_rtype_builder.add(Rtype::RRSIG);
+    let _ = apex_rtype_builder.add(Rtype::NSEC);
+    let _ = apex_rtype_builder.add(Rtype::DNSKEY);
+    let apex_rtypes = apex_rtype_builder.finalize();
+    let mut other_rtype_builder = RtypeBitmapBuilder::new_vec();
+    let _ = other_rtype_builder.add(Rtype::A);
+    let _ = other_rtype_builder.add(Rtype::AAAA);
+    let _ = other_rtype_builder.add(Rtype::RRSIG);
+    let _ = other_rtype_builder.add(Rtype::NSEC);
+    let other_rtypes = other_rtype_builder.finalize();
+
+    // Closure for handling failures
+    let send_dns_failed = |req: &Message<[u8]>,
+                           code: Rcode,
+                           from: &SocketAddr,
+                           query: &Option<Question<ParsedName<&[u8]>>>| {
+        let res_builder = MessageBuilder::new_vec();
+        match res_builder.start_answer(req, code) {
+            Ok(res) => {
+                // No answer, skip directly to authority
+                let mut auth = res.authority();
+
+                // Add SOA record for only NOERROR and NXDOMAIN
+                if query.is_some() && (code == Rcode::NOERROR || code == Rcode::NXDOMAIN) {
+                    let mut soa_auth_recs_sign =
+                        SortedRecords::<&Name<Vec<u8>>, Soa<&Name<Vec<u8>>>>::new();
+                    let rec = Record::new(
+                        &server_dname,
+                        Class::IN,
+                        Ttl::from_secs(900),
+                        Soa::new(
+                            &server_dname,
+                            &soa_rname_dname,
+                            Serial(1),
+                            Ttl::from_secs(3600),
+                            Ttl::from_secs(3600),
+                            Ttl::from_secs(86400),
+                            Ttl::from_secs(60),
+                        ),
+                    );
+                    auth.push(rec.clone()).unwrap();
+                    let _ = soa_auth_recs_sign.insert(rec);
+
+                    // DNSSEC signing and NSEC records
+                    if req.opt().is_some() && req.opt().unwrap().dnssec_ok() {
+                        let incep_ts = Timestamp::now();
+                        let exp_ts =
+                            Timestamp::from(Timestamp::now().into_int().overflowing_add(86400).0);
+
+                        // Sign the SOA
+                        for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
+                            let key = dnskeys.get(&(256, algo));
+                            if key.is_none() {
+                                continue;
+                            }
+                            for rrsig in soa_auth_recs_sign
+                                .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
+                                    &apex_name,
+                                    incep_ts,
+                                    exp_ts,
+                                    key.unwrap(),
+                                )
+                                .unwrap()
+                            {
+                                let _ = auth.push(rrsig);
+                            }
+                        }
+
+                        // Set NSEC records
+                        let mut nsec_auth_recs_sign =
+                            SortedRecords::<&Name<Vec<u8>>, Nsec<Vec<u8>, &Name<Vec<u8>>>>::new();
+                        let mut next_name;
+                        let mut insert_apex = false;
+                        match names_served
+                            .binary_search_by(|a| a.canonical_cmp(&query.unwrap().qname()))
+                        {
+                            Ok(p) => {
+                                next_name = p + 1;
+                            }
+                            Err(p) => {
+                                next_name = p;
+                                // Insert apex if there is no exact match
+                                insert_apex = true
+                            }
+                        };
+                        // Insert NSEC for apex
+                        if insert_apex || next_name == 1 {
+                            let rec = Record::new(
+                                &names_served[0],
+                                Class::IN,
+                                Ttl::from_secs(60),
+                                Nsec::new(&names_served[1], apex_rtypes.clone()),
+                            );
+                            auth.push(rec.clone()).unwrap();
+                            let _ = nsec_auth_recs_sign.insert(rec);
+                        }
+                        if next_name > 1 {
+                            let prev_name = next_name - 1;
+                            // When next_name is out of range, it wraps around
+                            if next_name >= names_served.len() {
+                                next_name = 0;
+                            }
+                            let rec = Record::new(
+                                &names_served[prev_name],
+                                Class::IN,
+                                Ttl::from_secs(60),
+                                Nsec::new(&names_served[next_name], other_rtypes.clone()),
+                            );
+                            auth.push(rec.clone()).unwrap();
+                            let _ = nsec_auth_recs_sign.insert(rec);
+                        }
+
+                        // Sign the NSECs
+                        for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
+                            let key = dnskeys.get(&(256, algo));
+                            if key.is_none() {
+                                continue;
+                            }
+                            for rrsig in nsec_auth_recs_sign
+                                .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
+                                    &apex_name,
+                                    incep_ts,
+                                    exp_ts,
+                                    key.unwrap(),
+                                )
+                                .unwrap()
+                            {
+                                let _ = auth.push(rrsig);
+                            }
+                        }
+                    }
+                }
+
+                // Additional section
+                let mut addl = auth.additional();
+                if req.opt().is_some() {
+                    addl.opt(|opt| {
+                        opt.set_rcode(code.into());
+                        if req.opt().unwrap().dnssec_ok() {
+                            opt.set_dnssec_ok(true);
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                }
+
+                // Send
+                let _ = sock.send_to(addl.into_message().as_slice(), from);
+            }
+            Err(e) => {
+                println!("Failed to send DNS no data: {}", e);
+            }
+        }
+    };
+
+    // Main loop
     loop {
         let ret: Result<(), String> = (|| -> Result<(), String> {
             // Handle queries
@@ -1308,7 +1447,7 @@ fn dns_thread(
                 return Err("Ignored non-query".to_string());
             }
             if req_header.tc() {
-                send_dns_failed(&sock, req, Rcode::SERVFAIL, &from);
+                send_dns_failed(req, Rcode::SERVFAIL, &from, &None);
                 return Err("Received truncated, unsupported".to_string());
             }
 
@@ -1335,7 +1474,7 @@ fn dns_thread(
                 let question = match q_r {
                     Ok(q) => q,
                     Err(..) => {
-                        send_dns_failed(&sock, req, Rcode::FORMERR, &from);
+                        send_dns_failed(req, Rcode::FORMERR, &from, &None);
                         continue;
                     }
                 };
@@ -1343,7 +1482,7 @@ fn dns_thread(
 
                 // Make sure we can serve this
                 if !name.ends_with(&seed_domain_dname) {
-                    send_dns_failed(&sock, req, Rcode::REFUSED, &from);
+                    send_dns_failed(req, Rcode::REFUSED, &from, &Some(question));
                     continue;
                 }
 
@@ -1351,13 +1490,13 @@ fn dns_thread(
                 let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
                 if name.label_count() != seed_domain_dname.label_count() {
                     if name.label_count() != seed_domain_dname.label_count() + 1 {
-                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
+                        send_dns_failed(req, Rcode::NXDOMAIN, &from, &Some(question));
                         continue;
                     }
                     let filter_label = name.first().to_string();
                     let this_filter = allowed_filters.get(&filter_label);
                     if this_filter.is_none() {
-                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
+                        send_dns_failed(req, Rcode::NXDOMAIN, &from, &Some(question));
                         continue;
                     }
                     filter = *this_filter.unwrap();
@@ -1367,7 +1506,7 @@ fn dns_thread(
                 match question.qclass() {
                     Class::IN => (),
                     _ => {
-                        send_dns_failed(&sock, req, Rcode::NOTIMP, &from);
+                        send_dns_failed(req, Rcode::NOTIMP, &from, &Some(question));
                         continue;
                     }
                 };
@@ -1426,6 +1565,7 @@ fn dns_thread(
                     Rtype::A => (),
                     Rtype::AAAA => (),
                     _ => {
+                        send_dns_failed(req, Rcode::NOERROR, &from, &Some(question));
                         continue;
                     }
                 };
