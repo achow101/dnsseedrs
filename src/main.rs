@@ -14,9 +14,10 @@ use domain::base::iana::Class;
 use domain::base::iana::SecAlg;
 use domain::base::message::Message;
 use domain::base::message_builder::MessageBuilder;
-use domain::base::name::{Name, ParsedName, ToName};
+use domain::base::name::{Name, ParsedName, RelativeName, ToName};
 use domain::base::record::{Record, Ttl};
 use domain::base::serial::Serial;
+use domain::base::CanonicalOrd;
 use domain::rdata::aaaa::Aaaa;
 use domain::rdata::dnssec::{Dnskey, Ds, Timestamp};
 use domain::rdata::rfc1035::{Ns, Soa, A};
@@ -1151,8 +1152,14 @@ fn dns_thread(
     // Fixed table of allowed filters
     let allowed_filters: HashMap<String, ServiceFlags> = HashMap::from([
         ("x1".to_string(), ServiceFlags::NETWORK),
-        ("x5".to_string(), ServiceFlags::NETWORK | ServiceFlags::BLOOM),
-        ("x9".to_string(), ServiceFlags::NETWORK | ServiceFlags::WITNESS),
+        (
+            "x5".to_string(),
+            ServiceFlags::NETWORK | ServiceFlags::BLOOM,
+        ),
+        (
+            "x9".to_string(),
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        ),
         (
             "x49".to_string(),
             ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
@@ -1173,7 +1180,10 @@ fn dns_thread(
             ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::BLOOM,
         ),
         ("x400".to_string(), ServiceFlags::NETWORK_LIMITED),
-        ("x404".to_string(), ServiceFlags::NETWORK_LIMITED | ServiceFlags::BLOOM),
+        (
+            "x404".to_string(),
+            ServiceFlags::NETWORK_LIMITED | ServiceFlags::BLOOM,
+        ),
         (
             "x408".to_string(),
             ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS,
@@ -1199,8 +1209,14 @@ fn dns_thread(
         ),
     ]);
 
-    // Compute the canonical ordering of served names
-
+    // Get vector of served domain names in canonical ordering
+    let mut names_served = Vec::<Name<Vec<u8>>>::new();
+    names_served.push(seed_domain_dname.clone());
+    for n in allowed_filters.keys() {
+        let sub_name: RelativeName<Vec<u8>> = RelativeName::from_str(n).unwrap();
+        names_served.push(sub_name.chain(seed_domain_dname.clone()).unwrap().to_name());
+    }
+    names_served.sort_by(|a, b| a.canonical_cmp(b));
 
     // Read the DNSSEC keys
     // dnskeys map: (flags, algo) -> keypair
