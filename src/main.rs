@@ -16,7 +16,7 @@ use domain::base::name::Dname;
 use domain::base::record::{Record, Ttl};
 use domain::base::serial::Serial;
 use domain::rdata::aaaa::Aaaa;
-use domain::rdata::rfc1035::{Soa, A};
+use domain::rdata::rfc1035::{Ns, Soa, A};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use rand::seq::SliceRandom;
@@ -1139,6 +1139,18 @@ fn dns_thread(
                             Ttl::from_secs(86400),
                             Ttl::from_secs(60),
                         ),
+                    );
+                    res.push(rec).unwrap();
+                    continue;
+                };
+
+                // Handle NS separately
+                if question.qtype() == Rtype::Ns {
+                    let rec = Record::new(
+                        name,
+                        Class::In,
+                        Ttl::from_secs(86400),
+                        Ns::new(&server_dname),
                     );
                     res.push(rec).unwrap();
                     continue;
