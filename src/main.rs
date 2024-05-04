@@ -105,12 +105,12 @@ struct NodeAddress {
     port: u16,
 }
 
-impl ToString for NodeAddress {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for NodeAddress{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.host {
-            Host::Ipv4(ip) => format!("{}:{}", ip, self.port),
-            Host::Ipv6(ip) | Host::CJDNS(ip) => format!("[{}]:{}", ip, self.port),
-            Host::OnionV3(s) | Host::I2P(s) => format!("{}:{}", s, self.port),
+            Host::Ipv4(ip) => write!(f, "{}:{}", ip, self.port),
+            Host::Ipv6(ip) | Host::CJDNS(ip) => write!(f, "[{}]:{}", ip, self.port),
+            Host::OnionV3(s) | Host::I2P(s) => write!(f, "{}:{}", s, self.port),
         }
     }
 }
@@ -491,7 +491,7 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                         .duration_since(time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs();
-                    new_info.user_agent = ver.user_agent.clone();
+                    new_info.user_agent.clone_from(&ver.user_agent);
                     new_info.services = ver.services.to_u64();
                     new_info.starting_height = ver.start_height;
                     new_info.protocol_version = ver.version;
@@ -679,7 +679,7 @@ fn crawler_thread(
     // Check proxies
     println!("Checking onion proxy");
     let onion_proxy_check = TcpStream::connect_timeout(
-        &SocketAddr::from_str(&net_status.onion_proxy.as_ref().unwrap()).unwrap(),
+        &SocketAddr::from_str(net_status.onion_proxy.as_ref().unwrap()).unwrap(),
         time::Duration::from_secs(10),
     );
     if onion_proxy_check.is_ok() {
@@ -703,7 +703,7 @@ fn crawler_thread(
 
     println!("Checking I2P proxy");
     let i2p_proxy_check = TcpStream::connect_timeout(
-        &SocketAddr::from_str(&net_status.i2p_proxy.as_ref().unwrap()).unwrap(),
+        &SocketAddr::from_str(net_status.i2p_proxy.as_ref().unwrap()).unwrap(),
         time::Duration::from_secs(10),
     );
     if i2p_proxy_check.is_ok() {
