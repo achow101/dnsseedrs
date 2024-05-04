@@ -1161,7 +1161,6 @@ fn dns_thread(
                     Rtype::A => (),
                     Rtype::Aaaa => (),
                     _ => {
-                        send_dns_failed(&sock, req, Rcode::NotImp, &from);
                         continue;
                     }
                 };
@@ -1277,22 +1276,42 @@ fn dns_thread(
                 };
             }
 
-            // Add OPT to our response if it is there
-            // And send
-            match req.opt() {
-                Some(..) => {
-                    let mut addl = res.additional();
-                    addl.opt(|opt| {
-                        opt.set_rcode(Rcode::NoError.into());
-                        Ok(())
-                    })
-                    .unwrap();
-                    let _ = sock.send_to(addl.into_message().as_slice(), from);
-                }
-                None => {
-                    let _ = sock.send_to(res.into_message().as_slice(), from);
-                }
+            // Advance to authority section
+            let mut auth = res.authority();
+
+            // Add SOA to authority section if there are no answers
+            if auth.counts().ancount() == 0 {
+                let rec = Record::new(
+                    &server_dname,
+                    Class::In,
+                    Ttl::from_secs(900),
+                    Soa::new(
+                        &server_dname,
+                        &soa_rname_dname,
+                        Serial(1),
+                        Ttl::from_secs(3600),
+                        Ttl::from_secs(3600),
+                        Ttl::from_secs(86400),
+                        Ttl::from_secs(60),
+                    ),
+                );
+                auth.push(rec).unwrap();
             }
+
+            // Advance to additional section
+            let mut addl = auth.additional();
+
+            // Add OPT to our response if it is there
+            if req.opt().is_some() {
+                addl.opt(|opt| {
+                    opt.set_rcode(Rcode::NoError.into());
+                    Ok(())
+                })
+                .unwrap();
+            }
+
+            // Send response
+            let _ = sock.send_to(addl.into_message().as_slice(), from);
 
             Ok(())
         })();
