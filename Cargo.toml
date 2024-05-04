@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 base32ct = { version = "0.2.0", features = ["alloc"] }
+base64ct = { version = "1.6.0", features = ["alloc"] }
 bitcoin = "0.32.0"
 clap = { version = "4.5.1", features = ["derive"] }
 crossbeam = "0.8.4"
