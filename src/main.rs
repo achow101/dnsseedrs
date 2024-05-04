@@ -14,7 +14,7 @@ use domain::base::iana::Class;
 use domain::base::iana::SecAlg;
 use domain::base::message::Message;
 use domain::base::message_builder::MessageBuilder;
-use domain::base::name::Dname;
+use domain::base::name::Name;
 use domain::base::record::{Record, Ttl};
 use domain::base::serial::Serial;
 use domain::rdata::aaaa::Aaaa;
@@ -1073,9 +1073,9 @@ fn dns_thread(
 ) {
     #[allow(clippy::single_char_pattern)]
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
-    let seed_domain_dname: Dname<Vec<u8>> = Dname::from_str(seed_domain).unwrap();
-    let server_dname: Dname<Vec<u8>> = Dname::from_str(server_name).unwrap();
-    let soa_rname_dname: Dname<Vec<u8>> = Dname::from_str(soa_rname).unwrap();
+    let seed_domain_dname: Name<Vec<u8>> = Name::from_str(seed_domain).unwrap();
+    let server_dname: Name<Vec<u8>> = Name::from_str(server_name).unwrap();
+    let soa_rname_dname: Name<Vec<u8>> = Name::from_str(soa_rname).unwrap();
 
     let allowed_filters = HashSet::from([
         ServiceFlags::NETWORK,                         // x1
@@ -1191,14 +1191,14 @@ fn dns_thread(
                 return Err("Ignored non-query".to_string());
             }
             if req_header.tc() {
-                send_dns_failed(&sock, req, Rcode::ServFail, &from);
+                send_dns_failed(&sock, req, Rcode::SERVFAIL, &from);
                 return Err("Received truncated, unsupported".to_string());
             }
 
             // Answer the questions
             let mut res_builder = MessageBuilder::new_vec();
             res_builder.header_mut().set_aa(true);
-            let mut res = match res_builder.start_answer(req, Rcode::NoError) {
+            let mut res = match res_builder.start_answer(req, Rcode::NOERROR) {
                 Ok(r) => r,
                 Err(e) => {
                     return Err(format!("E3 {}", e));
@@ -1208,7 +1208,7 @@ fn dns_thread(
                 let question = match q_r {
                     Ok(q) => q,
                     Err(..) => {
-                        send_dns_failed(&sock, req, Rcode::FormErr, &from);
+                        send_dns_failed(&sock, req, Rcode::FORMERR, &from);
                         continue;
                     }
                 };
@@ -1216,7 +1216,7 @@ fn dns_thread(
 
                 // Make sure we can serve this
                 if !name.ends_with(&seed_domain_dname) {
-                    send_dns_failed(&sock, req, Rcode::NXDomain, &from);
+                    send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
                     continue;
                 }
 
@@ -1224,12 +1224,12 @@ fn dns_thread(
                 let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
                 if name.label_count() != seed_domain_dname.label_count() {
                     if name.label_count() != seed_domain_dname.label_count() + 1 {
-                        send_dns_failed(&sock, req, Rcode::NXDomain, &from);
+                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
                         continue;
                     }
                     let filter_label = name.first().to_string();
                     if !filter_label.starts_with('x') || filter_label.starts_with("x0") {
-                        send_dns_failed(&sock, req, Rcode::NXDomain, &from);
+                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
                         continue;
                     }
                     match u64::from_str_radix(&filter_label[1..], 16) {
@@ -1237,30 +1237,30 @@ fn dns_thread(
                             filter = ServiceFlags::from(f);
                         }
                         Err(..) => {
-                            send_dns_failed(&sock, req, Rcode::NXDomain, &from);
+                            send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
                             continue;
                         }
                     }
                     if !allowed_filters.contains(&filter) {
-                        send_dns_failed(&sock, req, Rcode::NXDomain, &from);
+                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from);
                         continue;
                     }
                 }
 
                 // Check supported class
                 match question.qclass() {
-                    Class::In => (),
+                    Class::IN => (),
                     _ => {
-                        send_dns_failed(&sock, req, Rcode::NotImp, &from);
+                        send_dns_failed(&sock, req, Rcode::NOTIMP, &from);
                         continue;
                     }
                 };
 
                 // Handle SOA separately
-                if question.qtype() == Rtype::Soa {
+                if question.qtype() == Rtype::SOA {
                     let rec = Record::new(
                         name,
-                        Class::In,
+                        Class::IN,
                         Ttl::from_secs(900),
                         Soa::new(
                             &server_dname,
@@ -1277,10 +1277,10 @@ fn dns_thread(
                 };
 
                 // Handle NS separately
-                if question.qtype() == Rtype::Ns {
+                if question.qtype() == Rtype::NS {
                     let rec = Record::new(
                         name,
-                        Class::In,
+                        Class::IN,
                         Ttl::from_secs(86400),
                         Ns::new(&server_dname),
                     );
@@ -1291,7 +1291,7 @@ fn dns_thread(
                 // Check supported record type
                 match question.qtype() {
                     Rtype::A => (),
-                    Rtype::Aaaa => (),
+                    Rtype::AAAA => (),
                     _ => {
                         continue;
                     }
@@ -1388,17 +1388,17 @@ fn dns_thread(
                                 break;
                             }
                             let rec =
-                                Record::new(name, Class::In, Ttl::from_secs(60), A::new(*node));
+                                Record::new(name, Class::IN, Ttl::from_secs(60), A::new(*node));
                             res.push(rec).unwrap();
                         }
                     }
-                    Rtype::Aaaa => {
+                    Rtype::AAAA => {
                         for (i, node) in addrs.ipv6.iter().enumerate() {
                             if i >= 20 {
                                 break;
                             }
                             let rec =
-                                Record::new(name, Class::In, Ttl::from_secs(60), Aaaa::new(*node));
+                                Record::new(name, Class::IN, Ttl::from_secs(60), Aaaa::new(*node));
                             res.push(rec).unwrap();
                         }
                     }
@@ -1415,7 +1415,7 @@ fn dns_thread(
             if auth.counts().ancount() == 0 {
                 let rec = Record::new(
                     &server_dname,
-                    Class::In,
+                    Class::IN,
                     Ttl::from_secs(900),
                     Soa::new(
                         &server_dname,
@@ -1436,7 +1436,7 @@ fn dns_thread(
             // Add OPT to our response if it is there
             if req.opt().is_some() {
                 addl.opt(|opt| {
-                    opt.set_rcode(Rcode::NoError.into());
+                    opt.set_rcode(Rcode::NOERROR.into());
                     Ok(())
                 })
                 .unwrap();
