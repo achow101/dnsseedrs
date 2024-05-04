@@ -1004,7 +1004,8 @@ fn send_dns_failed(sock: &UdpSocket, req: &Message<[u8]>, code: Rcode, from: &So
 }
 
 fn dns_thread(
-    sock: UdpSocket,
+    bind_addr: &str,
+    bind_port: u16,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
     seed_domain: &str,
     server_name: &str,
@@ -1039,6 +1040,10 @@ fn dns_thread(
             | ServiceFlags::COMPACT_FILTERS, // xc48
         ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM,  // x40c
     ]);
+
+    // Bind socket
+    let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
+    println!("Bound socket");
 
     loop {
         let ret: Result<(), String> = (|| -> Result<(), String> {
@@ -1388,9 +1393,6 @@ fn main() {
         None => println!("I2P proxy bad"),
     }
 
-    // Bind socket
-    let sock = UdpSocket::bind((args.address, args.port)).unwrap();
-
     let net_status = NetStatus {
         chain,
         ipv4: args.ipv4_reachable,
@@ -1457,7 +1459,8 @@ fn main() {
     let db_conn_c3 = db_conn.clone();
     let t_dns = thread::spawn(move || {
         dns_thread(
-            sock,
+            &args.address,
+            args.port,
             db_conn_c3,
             &args.seed_domain,
             &args.server_name,
