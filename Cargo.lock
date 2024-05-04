@@ -356,6 +356,7 @@ dependencies = [
  "domain",
  "flate2",
  "rand",
+ "ring",
  "rusqlite",
  "sha3",
  "tar",
@@ -364,9 +365,8 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cd50aea158e9a57c9c9075ca7a3dfa4c08d9a468b405832383876f9df85379b"
+version = "0.10.1-dev"
+source = "git+https://github.com/achow101/domain?branch=pub-familyname#ea58f913c388a9204be3e766287221e7d5e9e41a"
 dependencies = [
  "bytes",
  "octseq",
