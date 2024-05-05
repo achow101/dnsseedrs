@@ -25,7 +25,7 @@ use domain::{
     },
     rdata::{
         aaaa::Aaaa,
-        dnssec::{Dnskey, Ds, Nsec, RtypeBitmapBuilder, Timestamp},
+        dnssec::{Dnskey, Ds, Nsec, RtypeBitmap, RtypeBitmapBuilder, Timestamp},
         rfc1035::{Ns, Soa, A},
     },
     sign::{
@@ -124,6 +124,189 @@ impl SigningKey for DnsSigningKey {
     }
 }
 
+struct SeederInfo {
+    seed_domain: Name<Vec<u8>>,
+    seed_apex: FamilyName<Name<Vec<u8>>>,
+    server_name: Name<Vec<u8>>,
+    soa_rname: Name<Vec<u8>>,
+    dnskeys: HashMap<(u16, SecAlg), DnsSigningKey>,
+    names_served: Vec<Name<Vec<u8>>>,
+
+    // Basically static, setup on init and never changed
+    allowed_filters: HashMap<String, ServiceFlags>,
+    apex_rtypes: RtypeBitmap<Vec<u8>>,
+    other_rtypes: RtypeBitmap<Vec<u8>>,
+}
+
+impl SeederInfo {
+    fn new(seed_name: &str, server_name: &str, soa_rname: &str, dnskeys_dir: Option<String>) -> SeederInfo {
+        // Parse the name strings
+        let seed_domain_dname: Name<Vec<u8>> = Name::from_str(seed_name).unwrap();
+        let seed_apex = FamilyName::new(seed_domain_dname.clone(), Class::IN);
+        let server_dname: Name<Vec<u8>> = Name::from_str(server_name).unwrap();
+        let soa_rname_dname: Name<Vec<u8>> = Name::from_str(soa_rname).unwrap();
+
+        // Fixed table of allowed filters
+        let allowed_filters: HashMap<String, ServiceFlags> = HashMap::from([
+            ("x1".to_string(), ServiceFlags::NETWORK),
+            (
+                "x5".to_string(),
+                ServiceFlags::NETWORK | ServiceFlags::BLOOM,
+            ),
+            (
+                "x9".to_string(),
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            ),
+            (
+                "x49".to_string(),
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
+            ),
+            (
+                "x809".to_string(),
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+            ),
+            (
+                "x849".to_string(),
+                ServiceFlags::NETWORK
+                    | ServiceFlags::WITNESS
+                    | ServiceFlags::P2P_V2
+                    | ServiceFlags::COMPACT_FILTERS,
+            ),
+            (
+                "xd".to_string(),
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::BLOOM,
+            ),
+            ("x400".to_string(), ServiceFlags::NETWORK_LIMITED),
+            (
+                "x404".to_string(),
+                ServiceFlags::NETWORK_LIMITED | ServiceFlags::BLOOM,
+            ),
+            (
+                "x408".to_string(),
+                ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS,
+            ),
+            (
+                "x448".to_string(),
+                ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
+            ),
+            (
+                "xc08".to_string(),
+                ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
+            ),
+            (
+                "xc48".to_string(),
+                ServiceFlags::NETWORK_LIMITED
+                    | ServiceFlags::WITNESS
+                    | ServiceFlags::P2P_V2
+                    | ServiceFlags::COMPACT_FILTERS,
+            ),
+            (
+                "x40c".to_string(),
+                ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM,
+            ),
+        ]);
+
+        // Get vector of served domain names in canonical ordering
+        let mut names_served = Vec::<Name<Vec<u8>>>::new();
+        names_served.push(seed_domain_dname.clone());
+        for n in allowed_filters.keys() {
+            let sub_name: RelativeName<Vec<u8>> = RelativeName::from_str(n).unwrap();
+            names_served.push(sub_name.chain(seed_domain_dname.clone()).unwrap().to_name());
+        }
+        names_served.sort_by(|a, b| a.canonical_cmp(b));
+
+        // Build rtype bitmaps
+        let mut apex_rtype_builder = RtypeBitmapBuilder::new_vec();
+        let _ = apex_rtype_builder.add(Rtype::A);
+        let _ = apex_rtype_builder.add(Rtype::AAAA);
+        let _ = apex_rtype_builder.add(Rtype::NS);
+        let _ = apex_rtype_builder.add(Rtype::SOA);
+        let _ = apex_rtype_builder.add(Rtype::RRSIG);
+        let _ = apex_rtype_builder.add(Rtype::NSEC);
+        let _ = apex_rtype_builder.add(Rtype::DNSKEY);
+        let mut other_rtype_builder = RtypeBitmapBuilder::new_vec();
+        let _ = other_rtype_builder.add(Rtype::A);
+        let _ = other_rtype_builder.add(Rtype::AAAA);
+        let _ = other_rtype_builder.add(Rtype::RRSIG);
+        let _ = other_rtype_builder.add(Rtype::NSEC);
+
+        // Read the DNSSEC keys
+        // dnskeys map: (flags, algo) -> keypair
+        let mut dnskeys = HashMap::<(u16, SecAlg), DnsSigningKey>::new();
+        if dnskeys_dir.is_some() {
+            let fname_prefix = format!("K{}", seed_name);
+            for entry in read_dir(Path::new(&dnskeys_dir.unwrap())).unwrap() {
+                let fname = entry.as_ref().unwrap().file_name().into_string().unwrap();
+                if !fname.starts_with(&fname_prefix) || !fname.ends_with(".key") {
+                    continue;
+                }
+
+                // Make sure there's a corresponding private key
+                let privkey_fname = entry.as_ref().unwrap().path().with_extension("private");
+                if !privkey_fname.is_file() {
+                    continue;
+                }
+
+                // Parse the public key file
+                let pubkey_file = File::open(entry.unwrap().path()).unwrap();
+                let pubkey_reader = BufReader::new(pubkey_file);
+                let pubkey_line = pubkey_reader.lines().last().unwrap().unwrap();
+                let pubkey_line_split: Vec<&str> = pubkey_line.splitn(7, ' ').collect();
+                if !pubkey_line_split[0].eq(&format!("{}.", seed_name))
+                    || !pubkey_line_split[1].eq("IN")
+                    || !pubkey_line_split[2].eq("DNSKEY")
+                {
+                    continue;
+                }
+                let flags = u16::from_str(pubkey_line_split[3]).unwrap();
+                let algo = SecAlg::from_int(u8::from_str(pubkey_line_split[5]).unwrap());
+                let pubkey = Dnskey::<Vec<u8>>::new(
+                    flags,
+                    u8::from_str(pubkey_line_split[4]).unwrap(),
+                    algo,
+                    Base64::decode_vec(&pubkey_line_split[6].replace(' ', "")).unwrap(),
+                )
+                .unwrap();
+
+                // Parse the private key file
+                let privkey_file = File::open(privkey_fname).unwrap();
+                let privkey_reader = BufReader::new(privkey_file);
+                let mut lines = privkey_reader.lines();
+                let mut line = lines.next().unwrap().unwrap();
+                if !line.eq("Private-key-format: v1.3") {
+                    continue;
+                }
+                line = lines.next().unwrap().unwrap();
+                let priv_algo =
+                    SecAlg::from_int(u8::from_str(line.split(' ').nth(1).unwrap()).unwrap());
+                if algo != priv_algo {
+                    continue;
+                }
+                line = lines.next().unwrap().unwrap();
+                let privkey = Base64::decode_vec(line.split(' ').nth(1).unwrap()).unwrap();
+
+                let dns_sign_key = DnsSigningKey::new(pubkey, privkey);
+                if dns_sign_key.is_err() {
+                    continue;
+                }
+                dnskeys.insert((flags, algo), dns_sign_key.unwrap());
+            }
+        }
+
+        SeederInfo{
+            seed_domain: seed_domain_dname,
+            seed_apex: seed_apex,
+            server_name: server_dname,
+            soa_rname: soa_rname_dname,
+            dnskeys: dnskeys,
+            names_served: names_served,
+            allowed_filters: allowed_filters,
+            apex_rtypes: apex_rtype_builder.finalize(),
+            other_rtypes: other_rtype_builder.finalize(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn dns_thread(
     bind_addr: &str,
@@ -137,164 +320,13 @@ pub fn dns_thread(
 ) {
     #[allow(clippy::single_char_pattern)]
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
-    let seed_domain_dname: Name<Vec<u8>> = Name::from_str(seed_domain).unwrap();
-    let server_dname: Name<Vec<u8>> = Name::from_str(server_name).unwrap();
-    let soa_rname_dname: Name<Vec<u8>> = Name::from_str(soa_rname).unwrap();
 
-    // Fixed table of allowed filters
-    let allowed_filters: HashMap<String, ServiceFlags> = HashMap::from([
-        ("x1".to_string(), ServiceFlags::NETWORK),
-        (
-            "x5".to_string(),
-            ServiceFlags::NETWORK | ServiceFlags::BLOOM,
-        ),
-        (
-            "x9".to_string(),
-            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
-        ),
-        (
-            "x49".to_string(),
-            ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
-        ),
-        (
-            "x809".to_string(),
-            ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
-        ),
-        (
-            "x849".to_string(),
-            ServiceFlags::NETWORK
-                | ServiceFlags::WITNESS
-                | ServiceFlags::P2P_V2
-                | ServiceFlags::COMPACT_FILTERS,
-        ),
-        (
-            "xd".to_string(),
-            ServiceFlags::NETWORK | ServiceFlags::WITNESS | ServiceFlags::BLOOM,
-        ),
-        ("x400".to_string(), ServiceFlags::NETWORK_LIMITED),
-        (
-            "x404".to_string(),
-            ServiceFlags::NETWORK_LIMITED | ServiceFlags::BLOOM,
-        ),
-        (
-            "x408".to_string(),
-            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS,
-        ),
-        (
-            "x448".to_string(),
-            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
-        ),
-        (
-            "xc08".to_string(),
-            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::P2P_V2,
-        ),
-        (
-            "xc48".to_string(),
-            ServiceFlags::NETWORK_LIMITED
-                | ServiceFlags::WITNESS
-                | ServiceFlags::P2P_V2
-                | ServiceFlags::COMPACT_FILTERS,
-        ),
-        (
-            "x40c".to_string(),
-            ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::BLOOM,
-        ),
-    ]);
-
-    // Get vector of served domain names in canonical ordering
-    let mut names_served = Vec::<Name<Vec<u8>>>::new();
-    names_served.push(seed_domain_dname.clone());
-    for n in allowed_filters.keys() {
-        let sub_name: RelativeName<Vec<u8>> = RelativeName::from_str(n).unwrap();
-        names_served.push(sub_name.chain(seed_domain_dname.clone()).unwrap().to_name());
-    }
-    names_served.sort_by(|a, b| a.canonical_cmp(b));
-
-    // Read the DNSSEC keys
-    // dnskeys map: (flags, algo) -> keypair
-    let mut dnskeys = HashMap::<(u16, SecAlg), DnsSigningKey>::new();
-    if dnssec_keys.is_some() {
-        let fname_prefix = format!("K{}", seed_domain);
-        for entry in read_dir(Path::new(&dnssec_keys.unwrap())).unwrap() {
-            let fname = entry.as_ref().unwrap().file_name().into_string().unwrap();
-            if !fname.starts_with(&fname_prefix) || !fname.ends_with(".key") {
-                continue;
-            }
-
-            // Make sure there's a corresponding private key
-            let privkey_fname = entry.as_ref().unwrap().path().with_extension("private");
-            if !privkey_fname.is_file() {
-                continue;
-            }
-
-            // Parse the public key file
-            let pubkey_file = File::open(entry.unwrap().path()).unwrap();
-            let pubkey_reader = BufReader::new(pubkey_file);
-            let pubkey_line = pubkey_reader.lines().last().unwrap().unwrap();
-            let pubkey_line_split: Vec<&str> = pubkey_line.splitn(7, ' ').collect();
-            if !pubkey_line_split[0].eq(&format!("{}.", seed_domain))
-                || !pubkey_line_split[1].eq("IN")
-                || !pubkey_line_split[2].eq("DNSKEY")
-            {
-                continue;
-            }
-            let flags = u16::from_str(pubkey_line_split[3]).unwrap();
-            let algo = SecAlg::from_int(u8::from_str(pubkey_line_split[5]).unwrap());
-            let pubkey = Dnskey::<Vec<u8>>::new(
-                flags,
-                u8::from_str(pubkey_line_split[4]).unwrap(),
-                algo,
-                Base64::decode_vec(&pubkey_line_split[6].replace(' ', "")).unwrap(),
-            )
-            .unwrap();
-
-            // Parse the private key file
-            let privkey_file = File::open(privkey_fname).unwrap();
-            let privkey_reader = BufReader::new(privkey_file);
-            let mut lines = privkey_reader.lines();
-            let mut line = lines.next().unwrap().unwrap();
-            if !line.eq("Private-key-format: v1.3") {
-                continue;
-            }
-            line = lines.next().unwrap().unwrap();
-            let priv_algo =
-                SecAlg::from_int(u8::from_str(line.split(' ').nth(1).unwrap()).unwrap());
-            if algo != priv_algo {
-                continue;
-            }
-            line = lines.next().unwrap().unwrap();
-            let privkey = Base64::decode_vec(line.split(' ').nth(1).unwrap()).unwrap();
-
-            let dns_sign_key = DnsSigningKey::new(pubkey, privkey);
-            if dns_sign_key.is_err() {
-                continue;
-            }
-            dnskeys.insert((flags, algo), dns_sign_key.unwrap());
-        }
-    }
-
-    // Set Apex name for DNSSEC signing to the seeder domain
-    let apex_name = FamilyName::new(seed_domain_dname.clone(), Class::IN);
+    // Setup seeder info
+    let seeder = SeederInfo::new(seed_domain, server_name, soa_rname, dnssec_keys);
 
     // Bind socket
     let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
     println!("Bound socket");
-
-    let mut apex_rtype_builder = RtypeBitmapBuilder::new_vec();
-    let _ = apex_rtype_builder.add(Rtype::A);
-    let _ = apex_rtype_builder.add(Rtype::AAAA);
-    let _ = apex_rtype_builder.add(Rtype::NS);
-    let _ = apex_rtype_builder.add(Rtype::SOA);
-    let _ = apex_rtype_builder.add(Rtype::RRSIG);
-    let _ = apex_rtype_builder.add(Rtype::NSEC);
-    let _ = apex_rtype_builder.add(Rtype::DNSKEY);
-    let apex_rtypes = apex_rtype_builder.finalize();
-    let mut other_rtype_builder = RtypeBitmapBuilder::new_vec();
-    let _ = other_rtype_builder.add(Rtype::A);
-    let _ = other_rtype_builder.add(Rtype::AAAA);
-    let _ = other_rtype_builder.add(Rtype::RRSIG);
-    let _ = other_rtype_builder.add(Rtype::NSEC);
-    let other_rtypes = other_rtype_builder.finalize();
 
     // Closure for handling failures
     let send_dns_failed = |req: &Message<[u8]>,
@@ -312,12 +344,12 @@ pub fn dns_thread(
                     let mut soa_auth_recs_sign =
                         SortedRecords::<&Name<Vec<u8>>, Soa<&Name<Vec<u8>>>>::new();
                     let rec = Record::new(
-                        &server_dname,
+                        &seeder.server_name,
                         Class::IN,
                         Ttl::from_secs(900),
                         Soa::new(
-                            &server_dname,
-                            &soa_rname_dname,
+                            &seeder.server_name,
+                            &seeder.soa_rname,
                             Serial(1),
                             Ttl::from_secs(3600),
                             Ttl::from_secs(3600),
@@ -329,7 +361,7 @@ pub fn dns_thread(
                     let _ = soa_auth_recs_sign.insert(rec);
 
                     // DNSSEC signing and NSEC records
-                    if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !dnskeys.is_empty()
+                    if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !seeder.dnskeys.is_empty()
                     {
                         let incep_ts =
                             Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
@@ -339,13 +371,13 @@ pub fn dns_thread(
 
                         // Sign the SOA
                         for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                            let key = dnskeys.get(&(256, algo));
+                            let key = seeder.dnskeys.get(&(256, algo));
                             if key.is_none() {
                                 continue;
                             }
                             for rrsig in soa_auth_recs_sign
                                 .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                                    &apex_name,
+                                    &seeder.seed_apex,
                                     exp_ts,
                                     incep_ts,
                                     key.unwrap(),
@@ -361,7 +393,7 @@ pub fn dns_thread(
                             SortedRecords::<&Name<Vec<u8>>, Nsec<Vec<u8>, &Name<Vec<u8>>>>::new();
                         let mut next_name;
                         let mut insert_apex = false;
-                        match names_served
+                        match seeder.names_served
                             .binary_search_by(|a| a.canonical_cmp(&query.unwrap().qname()))
                         {
                             Ok(p) => {
@@ -376,10 +408,10 @@ pub fn dns_thread(
                         // Insert NSEC for apex
                         if insert_apex || next_name == 1 {
                             let rec = Record::new(
-                                &names_served[0],
+                                &seeder.names_served[0],
                                 Class::IN,
                                 Ttl::from_secs(60),
-                                Nsec::new(&names_served[1], apex_rtypes.clone()),
+                                Nsec::new(&seeder.names_served[1], seeder.apex_rtypes.clone()),
                             );
                             auth.push(rec.clone()).unwrap();
                             let _ = nsec_auth_recs_sign.insert(rec);
@@ -387,14 +419,14 @@ pub fn dns_thread(
                         if next_name > 1 {
                             let prev_name = next_name - 1;
                             // When next_name is out of range, it wraps around
-                            if next_name >= names_served.len() {
+                            if next_name >= seeder.names_served.len() {
                                 next_name = 0;
                             }
                             let rec = Record::new(
-                                &names_served[prev_name],
+                                &seeder.names_served[prev_name],
                                 Class::IN,
                                 Ttl::from_secs(60),
-                                Nsec::new(&names_served[next_name], other_rtypes.clone()),
+                                Nsec::new(&seeder.names_served[next_name], seeder.other_rtypes.clone()),
                             );
                             auth.push(rec.clone()).unwrap();
                             let _ = nsec_auth_recs_sign.insert(rec);
@@ -402,13 +434,13 @@ pub fn dns_thread(
 
                         // Sign the NSECs
                         for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                            let key = dnskeys.get(&(256, algo));
+                            let key = seeder.dnskeys.get(&(256, algo));
                             if key.is_none() {
                                 continue;
                             }
                             for rrsig in nsec_auth_recs_sign
                                 .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                                    &apex_name,
+                                    &seeder.seed_apex,
                                     exp_ts,
                                     incep_ts,
                                     key.unwrap(),
@@ -497,20 +529,20 @@ pub fn dns_thread(
                 let name = question.qname();
 
                 // Make sure we can serve this
-                if !name.ends_with(&seed_domain_dname) {
+                if !name.ends_with(&seeder.seed_domain) {
                     send_dns_failed(req, Rcode::REFUSED, &from, &Some(question));
                     continue;
                 }
 
                 // Check for xNNN.<name> service flag filter
                 let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-                if name.label_count() != seed_domain_dname.label_count() {
-                    if name.label_count() != seed_domain_dname.label_count() + 1 {
+                if name.label_count() != seeder.seed_domain.label_count() {
+                    if name.label_count() != seeder.seed_domain.label_count() + 1 {
                         send_dns_failed(req, Rcode::NXDOMAIN, &from, &Some(question));
                         continue;
                     }
                     let filter_label = name.first().to_string();
-                    let this_filter = allowed_filters.get(&filter_label);
+                    let this_filter = seeder.allowed_filters.get(&filter_label);
                     if this_filter.is_none() {
                         send_dns_failed(req, Rcode::NXDOMAIN, &from, &Some(question));
                         continue;
@@ -528,7 +560,7 @@ pub fn dns_thread(
                 };
 
                 // Only return these for the apex domain
-                if name.eq(&seed_domain_dname) {
+                if name.eq(&seeder.seed_domain) {
                     // Handle SOA separately
                     if question.qtype() == Rtype::SOA {
                         let rec = Record::new(
@@ -536,8 +568,8 @@ pub fn dns_thread(
                             Class::IN,
                             Ttl::from_secs(900),
                             Soa::new(
-                                &server_dname,
-                                &soa_rname_dname,
+                                &seeder.server_name,
+                                &seeder.soa_rname,
                                 Serial(1),
                                 Ttl::from_secs(3600),
                                 Ttl::from_secs(3600),
@@ -556,7 +588,7 @@ pub fn dns_thread(
                             *name,
                             Class::IN,
                             Ttl::from_secs(86400),
-                            Ns::new(&server_dname),
+                            Ns::new(&seeder.server_name),
                         );
                         res.push(rec.clone()).unwrap();
                         let _ = ns_ans_recs_sign.insert(rec);
@@ -565,7 +597,7 @@ pub fn dns_thread(
 
                     // Handle DNSKEY separately
                     if question.qtype() == Rtype::DNSKEY {
-                        for dnskey in dnskeys.values() {
+                        for dnskey in seeder.dnskeys.values() {
                             let rec = Record::new(
                                 *name,
                                 Class::IN,
@@ -706,7 +738,7 @@ pub fn dns_thread(
             if req.opt().is_some()
                 && req.opt().unwrap().dnssec_ok()
                 && res.counts().ancount() > 0
-                && !dnskeys.is_empty()
+                && !seeder.dnskeys.is_empty()
             {
                 let incep_ts =
                     Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
@@ -715,13 +747,13 @@ pub fn dns_thread(
 
                 // Sign zone records
                 for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                    let key = dnskeys.get(&(256, algo));
+                    let key = seeder.dnskeys.get(&(256, algo));
                     if key.is_none() {
                         continue;
                     }
                     for rrsig in soa_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &apex_name,
+                            &seeder.seed_apex,
                             exp_ts,
                             incep_ts,
                             key.unwrap(),
@@ -732,7 +764,7 @@ pub fn dns_thread(
                     }
                     for rrsig in a_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &apex_name,
+                            &seeder.seed_apex,
                             exp_ts,
                             incep_ts,
                             key.unwrap(),
@@ -743,7 +775,7 @@ pub fn dns_thread(
                     }
                     for rrsig in aaaa_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &apex_name,
+                            &seeder.seed_apex,
                             exp_ts,
                             incep_ts,
                             key.unwrap(),
@@ -754,7 +786,7 @@ pub fn dns_thread(
                     }
                     for rrsig in ns_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &apex_name,
+                            &seeder.seed_apex,
                             exp_ts,
                             incep_ts,
                             key.unwrap(),
@@ -767,13 +799,13 @@ pub fn dns_thread(
 
                 // Sign key records
                 for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                    let key = dnskeys.get(&(257, algo));
+                    let key = seeder.dnskeys.get(&(257, algo));
                     if key.is_none() {
                         continue;
                     }
                     for rrsig in dnskey_ans_recs_sign
                         .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &apex_name,
+                            &seeder.seed_apex,
                             exp_ts,
                             incep_ts,
                             key.unwrap(),
@@ -793,12 +825,12 @@ pub fn dns_thread(
                 let mut soa_auth_recs_sign =
                     SortedRecords::<&Name<Vec<u8>>, Soa<&Name<Vec<u8>>>>::new();
                 let rec = Record::new(
-                    &server_dname,
+                    &seeder.server_name,
                     Class::IN,
                     Ttl::from_secs(900),
                     Soa::new(
-                        &server_dname,
-                        &soa_rname_dname,
+                        &seeder.server_name,
+                        &seeder.soa_rname,
                         Serial(1),
                         Ttl::from_secs(3600),
                         Ttl::from_secs(3600),
@@ -809,20 +841,20 @@ pub fn dns_thread(
                 auth.push(rec.clone()).unwrap();
                 let _ = soa_auth_recs_sign.insert(rec);
 
-                if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !dnskeys.is_empty() {
+                if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !seeder.dnskeys.is_empty() {
                     // Sign it
                     let incep_ts =
                         Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
                     let exp_ts =
                         Timestamp::from(Timestamp::now().into_int().overflowing_add(86400 * 7).0);
                     for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                        let key = dnskeys.get(&(256, algo));
+                        let key = seeder.dnskeys.get(&(256, algo));
                         if key.is_none() {
                             continue;
                         }
                         for rrsig in soa_auth_recs_sign
                             .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                                &apex_name,
+                                &seeder.seed_apex,
                                 exp_ts,
                                 incep_ts,
                                 key.unwrap(),
