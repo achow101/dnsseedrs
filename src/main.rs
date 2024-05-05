@@ -72,7 +72,8 @@ struct Args {
     soa_rname: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
     // Pick the network
@@ -156,7 +157,7 @@ fn main() {
 
     // Start DNS thread
     let db_conn_c3 = db_conn.clone();
-    let t_dns = thread::spawn(move || {
+    let t_dns = tokio::spawn(async move {
         dns_thread(
             &args.address,
             args.port,
@@ -166,7 +167,8 @@ fn main() {
             &args.soa_rname,
             &chain,
             args.dnssec_keys,
-        );
+        )
+        .await;
     });
 
     // Watchdog, exit if any main thread has died

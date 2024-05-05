@@ -3,9 +3,9 @@ use crate::dnssec::{parse_dns_keys_dir, DnsSigningKey, RecordsToSign};
 
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time,
 };
 
@@ -28,12 +28,13 @@ use domain::{
     sign::{key::SigningKey, records::FamilyName},
 };
 use rand::{seq::SliceRandom, thread_rng};
+use tokio::net::UdpSocket;
 
+#[derive(Clone)]
 struct CachedAddrs {
     ipv4: Vec<Ipv4Addr>,
     ipv6: Vec<Ipv6Addr>,
     timestamp: time::Instant,
-    shuffle_timestamp: time::Instant,
 }
 
 impl CachedAddrs {
@@ -42,7 +43,6 @@ impl CachedAddrs {
             ipv4: vec![],
             ipv6: vec![],
             timestamp: time::Instant::now(),
-            shuffle_timestamp: time::Instant::now(),
         }
     }
 }
@@ -201,13 +201,13 @@ impl SeederInfo {
     }
 }
 
-fn send_dns_failed(
-    sock: &UdpSocket,
+async fn send_dns_failed(
+    sock: Arc<UdpSocket>,
     req: &Message<[u8]>,
     code: Rcode,
     from: &SocketAddr,
     query: &Option<Question<ParsedName<&[u8]>>>,
-    seeder: &SeederInfo,
+    seeder: Arc<SeederInfo>,
 ) {
     let res_builder = MessageBuilder::new_vec();
     match res_builder.start_answer(req, code) {
@@ -294,7 +294,7 @@ fn send_dns_failed(
             }
 
             // Send
-            let _ = sock.send_to(addl.into_message().as_slice(), from);
+            let _ = sock.send_to(addl.into_message().as_slice(), from).await;
         }
         Err(e) => {
             println!("Failed to send DNS no data: {}", e);
@@ -302,13 +302,13 @@ fn send_dns_failed(
     }
 }
 
-fn process_dns_request(
+async fn process_dns_request(
     buf: &[u8],
     req_len: usize,
     from: SocketAddr,
-    sock: &UdpSocket,
-    seeder: &SeederInfo,
-    cache: &mut HashMap<ServiceFlags, CachedAddrs>,
+    sock: Arc<UdpSocket>,
+    seeder: Arc<SeederInfo>,
+    cache: Arc<RwLock<HashMap<ServiceFlags, CachedAddrs>>>,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
 ) -> Result<(), String> {
     let req = match Message::from_slice(&buf[..req_len]) {
@@ -324,7 +324,15 @@ fn process_dns_request(
         return Err("Ignored non-query".to_string());
     }
     if req_header.tc() {
-        send_dns_failed(sock, req, Rcode::SERVFAIL, &from, &None, seeder);
+        send_dns_failed(
+            sock.clone(),
+            req,
+            Rcode::SERVFAIL,
+            &from,
+            &None,
+            seeder.clone(),
+        )
+        .await;
         return Err("Received truncated, unsupported".to_string());
     }
 
@@ -344,7 +352,15 @@ fn process_dns_request(
         let question = match q_r {
             Ok(q) => q,
             Err(..) => {
-                send_dns_failed(sock, req, Rcode::FORMERR, &from, &None, seeder);
+                send_dns_failed(
+                    sock.clone(),
+                    req,
+                    Rcode::FORMERR,
+                    &from,
+                    &None,
+                    seeder.clone(),
+                )
+                .await;
                 continue;
             }
         };
@@ -352,7 +368,15 @@ fn process_dns_request(
 
         // Make sure we can serve this
         if !name.ends_with(&seeder.seed_domain) {
-            send_dns_failed(sock, req, Rcode::REFUSED, &from, &Some(question), seeder);
+            send_dns_failed(
+                sock.clone(),
+                req,
+                Rcode::REFUSED,
+                &from,
+                &Some(question),
+                seeder.clone(),
+            )
+            .await;
             continue;
         }
 
@@ -360,13 +384,29 @@ fn process_dns_request(
         let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
         if name.label_count() != seeder.seed_domain.label_count() {
             if name.label_count() != seeder.seed_domain.label_count() + 1 {
-                send_dns_failed(sock, req, Rcode::NXDOMAIN, &from, &Some(question), seeder);
+                send_dns_failed(
+                    sock.clone(),
+                    req,
+                    Rcode::NXDOMAIN,
+                    &from,
+                    &Some(question),
+                    seeder.clone(),
+                )
+                .await;
                 continue;
             }
             let filter_label = name.first().to_string();
             let this_filter = seeder.allowed_filters.get(&filter_label);
             if this_filter.is_none() {
-                send_dns_failed(sock, req, Rcode::NXDOMAIN, &from, &Some(question), seeder);
+                send_dns_failed(
+                    sock.clone(),
+                    req,
+                    Rcode::NXDOMAIN,
+                    &from,
+                    &Some(question),
+                    seeder.clone(),
+                )
+                .await;
                 continue;
             }
             filter = *this_filter.unwrap();
@@ -376,7 +416,15 @@ fn process_dns_request(
         match question.qclass() {
             Class::IN => (),
             _ => {
-                send_dns_failed(sock, req, Rcode::NOTIMP, &from, &Some(question), seeder);
+                send_dns_failed(
+                    sock.clone(),
+                    req,
+                    Rcode::NOTIMP,
+                    &from,
+                    &Some(question),
+                    seeder.clone(),
+                )
+                .await;
                 continue;
             }
         };
@@ -424,17 +472,32 @@ fn process_dns_request(
             Rtype::A => (),
             Rtype::AAAA => (),
             _ => {
-                send_dns_failed(sock, req, Rcode::NOERROR, &from, &Some(question), seeder);
+                send_dns_failed(
+                    sock.clone(),
+                    req,
+                    Rcode::NOERROR,
+                    &from,
+                    &Some(question),
+                    seeder.clone(),
+                )
+                .await;
                 continue;
             }
         };
 
-        // Check or fill cache
-        let needs_refresh = match cache.get(&filter) {
-            Some(c) => c.timestamp.elapsed() > time::Duration::from_secs(60 * 10),
-            None => true,
-        };
-        if needs_refresh {
+        // Read from cache
+        let mut read_addrs: Option<CachedAddrs>;
+        {
+            let cache_read = cache.read().unwrap();
+            read_addrs = cache_read.get(&filter).cloned();
+        }
+
+        // If cache for this filter was empty or expired, refresh it
+        if read_addrs.is_none()
+            || read_addrs
+                .as_ref()
+                .is_some_and(|c| c.timestamp.elapsed() > time::Duration::from_secs(60 * 10))
+        {
             let locked_db_conn = db_conn.lock().unwrap();
             let mut select_nodes = locked_db_conn
                 .prepare("SELECT * FROM nodes WHERE try_count > 0 ORDER BY RANDOM()")
@@ -498,20 +561,18 @@ fn process_dns_request(
                     }
                 };
             }
-            cache.insert(filter, new_cache);
+            {
+                let mut cache_write = cache.write().unwrap();
+                cache_write.insert(filter, new_cache.clone());
+            }
+            let _ = read_addrs.insert(new_cache);
         };
+        let mut addrs = read_addrs.unwrap();
 
-        let addrs: &mut CachedAddrs = cache
-            .get_mut(&filter)
-            .expect("Cache should have some entries");
-
-        if addrs.shuffle_timestamp.elapsed() > time::Duration::from_secs(5) {
-            // Shuffle cache in place
-            let mut rng = thread_rng();
-            addrs.ipv4.shuffle(&mut rng);
-            addrs.ipv6.shuffle(&mut rng);
-            addrs.shuffle_timestamp = time::Instant::now();
-        };
+        // Shuffle addresses before returning them
+        let mut rng = thread_rng();
+        addrs.ipv4.shuffle(&mut rng);
+        addrs.ipv6.shuffle(&mut rng);
 
         match question.qtype() {
             Rtype::A => {
@@ -594,13 +655,13 @@ fn process_dns_request(
     }
 
     // Send response
-    let _ = sock.send_to(addl.into_message().as_slice(), from);
+    let _ = sock.send_to(addl.into_message().as_slice(), from).await;
 
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn dns_thread(
+pub async fn dns_thread(
     bind_addr: &str,
     bind_port: u16,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
@@ -611,24 +672,45 @@ pub fn dns_thread(
     dnssec_keys: Option<String>,
 ) {
     #[allow(clippy::single_char_pattern)]
-    let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
+    let cache = Arc::new(RwLock::new(HashMap::<ServiceFlags, CachedAddrs>::new()));
 
     // Setup seeder info
-    let seeder = SeederInfo::new(seed_domain, server_name, soa_rname, dnssec_keys, *chain);
+    let seeder = Arc::new(SeederInfo::new(
+        seed_domain,
+        server_name,
+        soa_rname,
+        dnssec_keys,
+        *chain,
+    ));
 
     // Bind socket
-    let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
+    let sock = Arc::new(UdpSocket::bind((bind_addr, bind_port)).await.unwrap());
     println!("Bound socket");
 
     // Main loop
     loop {
         let mut buf = [0_u8; 1500];
-        let (req_len, from) = sock.recv_from(&mut buf).unwrap();
+        let (req_len, from) = sock.recv_from(&mut buf).await.unwrap();
 
-        let ret = process_dns_request(&buf, req_len, from, &sock, &seeder, &mut cache, db_conn.clone());
+        let sock_clone = sock.clone();
+        let seeder_clone = seeder.clone();
+        let cache_clone = cache.clone();
+        let db_conn_clone = db_conn.clone();
+        tokio::spawn(async move {
+            let ret = process_dns_request(
+                &buf,
+                req_len,
+                from,
+                sock_clone,
+                seeder_clone,
+                cache_clone,
+                db_conn_clone,
+            )
+            .await;
 
-        if let Err(e) = ret {
-            println!("{}", e);
-        }
+            if let Err(e) = ret {
+                println!("{}", e);
+            }
+        });
     }
 }
