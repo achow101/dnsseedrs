@@ -232,6 +232,7 @@ pub fn dns_thread(
 
                 // Add SOA record for only NOERROR and NXDOMAIN
                 if query.is_some() && (code == Rcode::NOERROR || code == Rcode::NXDOMAIN) {
+                    auth.header_mut().set_aa(true);
                     let mut auth_recs_sign = RecordsToSign::new();
                     auth.push(seeder.get_soa()).unwrap();
                     auth_recs_sign.add_soa(seeder.get_soa());
