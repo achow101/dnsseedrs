@@ -1317,7 +1317,7 @@ fn dns_thread(
                     let _ = soa_auth_recs_sign.insert(rec);
 
                     // DNSSEC signing and NSEC records
-                    if req.opt().is_some() && req.opt().unwrap().dnssec_ok() {
+                    if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !dnskeys.is_empty() {
                         let incep_ts =
                             Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
                         let exp_ts = Timestamp::from(
@@ -1687,7 +1687,11 @@ fn dns_thread(
             }
 
             // Insert RRSIG if DNSSEC
-            if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && res.counts().ancount() > 0 {
+            if req.opt().is_some()
+                && req.opt().unwrap().dnssec_ok()
+                && res.counts().ancount() > 0
+                && !dnskeys.is_empty()
+            {
                 let incep_ts =
                     Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
                 let exp_ts =
@@ -1789,7 +1793,7 @@ fn dns_thread(
                 auth.push(rec.clone()).unwrap();
                 let _ = soa_auth_recs_sign.insert(rec);
 
-                if req.opt().is_some() && req.opt().unwrap().dnssec_ok() {
+                if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !dnskeys.is_empty() {
                     // Sign it
                     let incep_ts =
                         Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
