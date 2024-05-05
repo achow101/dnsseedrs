@@ -262,6 +262,16 @@ $ dnssec-dsfromkey Kseeder.example.com.+013+20806.key
 seeder.example.com. IN DS 20806 13 2 82197169AEEFA02FD911BEABD9356739F7F807C072493A1AEA4B90396EE29074
 ```
 
+The parent Zone's DNS provider may not accept this format and instead require that the fields be
+provided individually. The fields are as follows:
+* `seeder.example.com.`: Name
+* `IN`: Class (typically unneeded)
+* `DS`: Record Type
+* `20806`: Key tag
+* `13`: Key Algorithm
+* `2`: Digest Type
+* `82197169AEEFA02FD911BEABD9356739F7F807C072493A1AEA4B90396EE29074`: Key Digest
+
 ## License
 
 This software is made available under the MIT license. See LICENSE for more details.
