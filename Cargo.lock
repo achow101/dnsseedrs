@@ -366,7 +366,7 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.10.1-dev"
-source = "git+https://github.com/achow101/domain?branch=achow-fixes#e6ad2ec6bbe9039f6e374a65dd99c982fc4675e1"
+source = "git+https://github.com/achow101/domain?branch=achow-fixes#12b031da21b1cd62419322c289cbbf3071df8854"
 dependencies = [
  "bytes",
  "octseq",
