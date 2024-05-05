@@ -59,11 +59,11 @@ struct Args {
     #[arg(long, default_value = "seeds.txt")]
     dump_file: String,
 
-    #[arg(long, default_value_t = true)]
-    ipv4_reachable: bool,
+    #[arg(long, default_value_t = false)]
+    no_ipv4: bool,
 
-    #[arg(long, default_value_t = true)]
-    ipv6_reachable: bool,
+    #[arg(long, default_value_t = false)]
+    no_ipv6: bool,
 
     #[arg(short, long, default_value_t = false)]
     cjdns_reachable: bool,
@@ -425,8 +425,6 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
 }
 
 fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status: NetStatus) {
-    println!("Crawling {}", &node.addr.to_string());
-
     let tried_timestamp = time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)
         .unwrap()
@@ -489,6 +487,8 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
         return;
     }
     let sock = sock_res.unwrap();
+
+    println!("Crawling {}", &node.addr.to_string());
 
     // Return error so we can update with failed try
     let ret: Result<(), std::io::Error> = (|| {
@@ -1868,8 +1868,8 @@ fn main() {
 
     let net_status = NetStatus {
         chain,
-        ipv4: args.ipv4_reachable,
-        ipv6: args.ipv4_reachable,
+        ipv4: !args.no_ipv4,
+        ipv6: !args.no_ipv6,
         cjdns: args.cjdns_reachable,
         onion_proxy: Some(args.onion_proxy),
         i2p_proxy: Some(args.i2p_proxy),
