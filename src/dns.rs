@@ -215,7 +215,6 @@ pub fn dns_thread(
     let mut dnskeys = HashMap::<(u16, SecAlg), DnsSigningKey>::new();
     if dnssec_keys.is_some() {
         let fname_prefix = format!("K{}", seed_domain);
-        println!("{}", &fname_prefix);
         for entry in read_dir(Path::new(&dnssec_keys.unwrap())).unwrap() {
             let fname = entry.as_ref().unwrap().file_name().into_string().unwrap();
             if !fname.starts_with(&fname_prefix) || !fname.ends_with(".key") {
@@ -528,53 +527,56 @@ pub fn dns_thread(
                     }
                 };
 
-                // Handle SOA separately
-                if question.qtype() == Rtype::SOA {
-                    let rec = Record::new(
-                        *name,
-                        Class::IN,
-                        Ttl::from_secs(900),
-                        Soa::new(
-                            &server_dname,
-                            &soa_rname_dname,
-                            Serial(1),
-                            Ttl::from_secs(3600),
-                            Ttl::from_secs(3600),
-                            Ttl::from_secs(86400),
-                            Ttl::from_secs(60),
-                        ),
-                    );
-                    res.push(rec.clone()).unwrap();
-                    let _ = soa_ans_recs_sign.insert(rec);
-                    continue;
-                };
-
-                // Handle NS separately
-                if question.qtype() == Rtype::NS {
-                    let rec = Record::new(
-                        *name,
-                        Class::IN,
-                        Ttl::from_secs(86400),
-                        Ns::new(&server_dname),
-                    );
-                    res.push(rec.clone()).unwrap();
-                    let _ = ns_ans_recs_sign.insert(rec);
-                    continue;
-                };
-
-                // Handle DNSKEY separately
-                if question.qtype() == Rtype::DNSKEY {
-                    for dnskey in dnskeys.values() {
+                // Only return these for the apex domain
+                if name.eq(&seed_domain_dname) {
+                    // Handle SOA separately
+                    if question.qtype() == Rtype::SOA {
                         let rec = Record::new(
                             *name,
                             Class::IN,
-                            Ttl::from_secs(3600),
-                            dnskey.dnskey().unwrap(),
+                            Ttl::from_secs(900),
+                            Soa::new(
+                                &server_dname,
+                                &soa_rname_dname,
+                                Serial(1),
+                                Ttl::from_secs(3600),
+                                Ttl::from_secs(3600),
+                                Ttl::from_secs(86400),
+                                Ttl::from_secs(60),
+                            ),
                         );
-                        let _ = res.push(rec.clone());
-                        let _ = dnskey_ans_recs_sign.insert(rec);
+                        res.push(rec.clone()).unwrap();
+                        let _ = soa_ans_recs_sign.insert(rec);
+                        continue;
+                    };
+
+                    // Handle NS separately
+                    if question.qtype() == Rtype::NS {
+                        let rec = Record::new(
+                            *name,
+                            Class::IN,
+                            Ttl::from_secs(86400),
+                            Ns::new(&server_dname),
+                        );
+                        res.push(rec.clone()).unwrap();
+                        let _ = ns_ans_recs_sign.insert(rec);
+                        continue;
+                    };
+
+                    // Handle DNSKEY separately
+                    if question.qtype() == Rtype::DNSKEY {
+                        for dnskey in dnskeys.values() {
+                            let rec = Record::new(
+                                *name,
+                                Class::IN,
+                                Ttl::from_secs(3600),
+                                dnskey.dnskey().unwrap(),
+                            );
+                            let _ = res.push(rec.clone());
+                            let _ = dnskey_ans_recs_sign.insert(rec);
+                        }
+                        continue;
                     }
-                    continue;
                 }
 
                 // Check supported record type
