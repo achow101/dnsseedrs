@@ -1434,7 +1434,7 @@ fn dns_thread(
     loop {
         let ret: Result<(), String> = (|| -> Result<(), String> {
             // Handle queries
-            let mut buf = [0_u8; 512];
+            let mut buf = [0_u8; 1500];
             let (req_len, from) = sock.recv_from(&mut buf).unwrap();
 
             let req = match Message::from_slice(&buf[..req_len]) {
