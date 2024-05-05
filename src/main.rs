@@ -1318,9 +1318,11 @@ fn dns_thread(
 
                     // DNSSEC signing and NSEC records
                     if req.opt().is_some() && req.opt().unwrap().dnssec_ok() {
-                        let incep_ts = Timestamp::now();
-                        let exp_ts =
-                            Timestamp::from(Timestamp::now().into_int().overflowing_add(86400).0);
+                        let incep_ts =
+                            Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
+                        let exp_ts = Timestamp::from(
+                            Timestamp::now().into_int().overflowing_add(86400 * 7).0,
+                        );
 
                         // Sign the SOA
                         for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
@@ -1686,8 +1688,10 @@ fn dns_thread(
 
             // Insert RRSIG if DNSSEC
             if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && res.counts().ancount() > 0 {
-                let incep_ts = Timestamp::now();
-                let exp_ts = Timestamp::from(Timestamp::now().into_int().overflowing_add(86400).0);
+                let incep_ts =
+                    Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
+                let exp_ts =
+                    Timestamp::from(Timestamp::now().into_int().overflowing_add(86400 * 7).0);
 
                 // Sign zone records
                 for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
@@ -1787,9 +1791,10 @@ fn dns_thread(
 
                 if req.opt().is_some() && req.opt().unwrap().dnssec_ok() {
                     // Sign it
-                    let incep_ts = Timestamp::now();
+                    let incep_ts =
+                        Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
                     let exp_ts =
-                        Timestamp::from(Timestamp::now().into_int().overflowing_add(86400).0);
+                        Timestamp::from(Timestamp::now().into_int().overflowing_add(86400 * 7).0);
                     for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
                         let key = dnskeys.get(&(256, algo));
                         if key.is_none() {
