@@ -6,8 +6,7 @@ use crate::dns::dns_thread;
 
 use std::{
     collections::HashSet,
-    fs,
-    fs::File,
+    fs::{File, rename},
     io::{BufReader, BufWriter, Read, Write},
     net::{IpAddr, Shutdown, SocketAddr, TcpStream},
     path::Path,
@@ -758,7 +757,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
             ).unwrap();
         }
         println!("Renaming {} to {}", txt_tmp_path, dump_file);
-        fs::rename(txt_tmp_path.clone(), dump_file).unwrap();
+        rename(txt_tmp_path.clone(), dump_file).unwrap();
 
         // Compress with gz
         let gz_tmp_path = format!("{}.gz.tmp", dump_file);
@@ -781,7 +780,7 @@ fn dumper_thread(db_conn: Arc<Mutex<rusqlite::Connection>>, dump_file: &String, 
         let gz_path = format!("{}.gz", dump_file);
         let archive_path = Path::new(&gz_path);
         println!("Renaming {} to {:?}", gz_tmp_path, archive_path);
-        fs::rename(gz_tmp_path, archive_path).unwrap();
+        rename(gz_tmp_path, archive_path).unwrap();
     }
 }
 

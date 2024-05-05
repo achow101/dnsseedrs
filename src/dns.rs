@@ -2,8 +2,7 @@ use crate::common::{is_good, Host, NodeInfo};
 
 use std::{
     collections::HashMap,
-    fs,
-    fs::File,
+    fs::{File, read_dir},
     io::{BufRead, BufReader},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::Path,
@@ -217,7 +216,7 @@ pub fn dns_thread(
     if dnssec_keys.is_some() {
         let fname_prefix = format!("K{}", seed_domain);
         println!("{}", &fname_prefix);
-        for entry in fs::read_dir(Path::new(&dnssec_keys.unwrap())).unwrap() {
+        for entry in read_dir(Path::new(&dnssec_keys.unwrap())).unwrap() {
             let fname = entry.as_ref().unwrap().file_name().into_string().unwrap();
             if !fname.starts_with(&fname_prefix) || !fname.ends_with(".key") {
                 continue;
