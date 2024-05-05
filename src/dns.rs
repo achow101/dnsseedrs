@@ -55,6 +55,7 @@ struct SeederInfo {
     dnskeys: HashMap<(u16, SecAlg), DnsSigningKey>,
     names_served: Vec<Name<Vec<u8>>>,
     soa_record: Record<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>,
+    chain: Network,
 
     // Consts, but can't make them compile time.
     allowed_filters: HashMap<String, ServiceFlags>,
@@ -68,6 +69,7 @@ impl SeederInfo {
         server_name: &str,
         soa_rname: &str,
         dnskeys_dir: Option<String>,
+        chain: Network,
     ) -> SeederInfo {
         // Parse the name strings
         let seed_domain_dname: Name<Vec<u8>> = Name::from_str(seed_name).unwrap();
@@ -187,6 +189,7 @@ impl SeederInfo {
             dnskeys,
             names_served,
             soa_record,
+            chain,
             allowed_filters,
             apex_rtypes: apex_rtype_builder.finalize(),
             other_rtypes: other_rtype_builder.finalize(),
@@ -198,7 +201,7 @@ impl SeederInfo {
     }
 }
 
-fn send_dns_failed( 
+fn send_dns_failed(
     sock: &UdpSocket,
     req: &Message<[u8]>,
     code: Rcode,
@@ -299,6 +302,303 @@ fn send_dns_failed(
     }
 }
 
+fn process_dns_request(
+    buf: &[u8],
+    req_len: usize,
+    from: SocketAddr,
+    sock: &UdpSocket,
+    seeder: &SeederInfo,
+    cache: &mut HashMap<ServiceFlags, CachedAddrs>,
+    db_conn: Arc<Mutex<rusqlite::Connection>>,
+) -> Result<(), String> {
+    let req = match Message::from_slice(&buf[..req_len]) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(format!("E1 {}", e));
+        }
+    };
+
+    let req_header = req.header();
+    if req_header.qr() {
+        // Ignore non-queries
+        return Err("Ignored non-query".to_string());
+    }
+    if req_header.tc() {
+        send_dns_failed(sock, req, Rcode::SERVFAIL, &from, &None, seeder);
+        return Err("Received truncated, unsupported".to_string());
+    }
+
+    // Track records for signing
+    let mut ans_recs_sign = RecordsToSign::new();
+
+    // Answer the questions
+    let mut res_builder = MessageBuilder::new_vec();
+    res_builder.header_mut().set_aa(true);
+    let mut res = match res_builder.start_answer(req, Rcode::NOERROR) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(format!("E3 {}", e));
+        }
+    };
+    for q_r in req.question() {
+        let question = match q_r {
+            Ok(q) => q,
+            Err(..) => {
+                send_dns_failed(sock, req, Rcode::FORMERR, &from, &None, seeder);
+                continue;
+            }
+        };
+        let name = question.qname();
+
+        // Make sure we can serve this
+        if !name.ends_with(&seeder.seed_domain) {
+            send_dns_failed(sock, req, Rcode::REFUSED, &from, &Some(question), seeder);
+            continue;
+        }
+
+        // Check for xNNN.<name> service flag filter
+        let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        if name.label_count() != seeder.seed_domain.label_count() {
+            if name.label_count() != seeder.seed_domain.label_count() + 1 {
+                send_dns_failed(sock, req, Rcode::NXDOMAIN, &from, &Some(question), seeder);
+                continue;
+            }
+            let filter_label = name.first().to_string();
+            let this_filter = seeder.allowed_filters.get(&filter_label);
+            if this_filter.is_none() {
+                send_dns_failed(sock, req, Rcode::NXDOMAIN, &from, &Some(question), seeder);
+                continue;
+            }
+            filter = *this_filter.unwrap();
+        }
+
+        // Check supported class
+        match question.qclass() {
+            Class::IN => (),
+            _ => {
+                send_dns_failed(sock, req, Rcode::NOTIMP, &from, &Some(question), seeder);
+                continue;
+            }
+        };
+
+        // Only return these for the apex domain
+        if name.eq(&seeder.seed_domain) {
+            // Handle SOA separately
+            if question.qtype() == Rtype::SOA {
+                res.push(seeder.get_soa()).unwrap();
+                ans_recs_sign.add_soa(seeder.get_soa());
+                continue;
+            };
+
+            // Handle NS separately
+            if question.qtype() == Rtype::NS {
+                let rec = Record::new(
+                    name.to_name::<Vec<u8>>(),
+                    Class::IN,
+                    Ttl::from_secs(86400),
+                    Ns::new(seeder.server_name.clone()),
+                );
+                res.push(rec.clone()).unwrap();
+                ans_recs_sign.add_ns(rec);
+                continue;
+            };
+
+            // Handle DNSKEY separately
+            if question.qtype() == Rtype::DNSKEY {
+                for dnskey in seeder.dnskeys.values() {
+                    let rec = Record::new(
+                        name.to_name::<Vec<u8>>(),
+                        Class::IN,
+                        Ttl::from_secs(3600),
+                        dnskey.dnskey().unwrap(),
+                    );
+                    let _ = res.push(rec.clone());
+                    ans_recs_sign.add_dnskey(rec);
+                }
+                continue;
+            }
+        }
+
+        // Check supported record type
+        match question.qtype() {
+            Rtype::A => (),
+            Rtype::AAAA => (),
+            _ => {
+                send_dns_failed(sock, req, Rcode::NOERROR, &from, &Some(question), seeder);
+                continue;
+            }
+        };
+
+        // Check or fill cache
+        let needs_refresh = match cache.get(&filter) {
+            Some(c) => c.timestamp.elapsed() > time::Duration::from_secs(60 * 10),
+            None => true,
+        };
+        if needs_refresh {
+            let locked_db_conn = db_conn.lock().unwrap();
+            let mut select_nodes = locked_db_conn
+                .prepare("SELECT * FROM nodes WHERE try_count > 0 ORDER BY RANDOM()")
+                .unwrap();
+            let node_iter = select_nodes
+                .query_map([], |r| {
+                    Ok(NodeInfo::construct(
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        u64::from_be_bytes(r.get(4)?),
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
+                        r.get(12)?,
+                    ))
+                })
+                .unwrap();
+            let nodes: Vec<NodeInfo> = node_iter
+                .filter_map(|n| match n {
+                    Ok(ni) => match ni {
+                        Ok(nni) => {
+                            if !is_good(&nni, &seeder.chain)
+                                || !ServiceFlags::from(nni.services).has(filter)
+                            {
+                                return None;
+                            }
+                            match nni.addr.host {
+                                Host::Ipv4(..) => Some(nni),
+                                Host::Ipv6(..) => Some(nni),
+                                _ => None,
+                            }
+                        }
+                        Err(e) => {
+                            println!("E4 {}", e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        println!("E5 {}", e);
+                        None
+                    }
+                })
+                .collect();
+            let mut new_cache = CachedAddrs::new();
+            for n in nodes {
+                match n.addr.host {
+                    Host::Ipv4(ip) => {
+                        new_cache.ipv4.push(ip);
+                    }
+                    Host::Ipv6(ip) => {
+                        new_cache.ipv6.push(ip);
+                    }
+                    _ => {
+                        continue;
+                    }
+                };
+            }
+            cache.insert(filter, new_cache);
+        };
+
+        let addrs: &mut CachedAddrs = cache
+            .get_mut(&filter)
+            .expect("Cache should have some entries");
+
+        if addrs.shuffle_timestamp.elapsed() > time::Duration::from_secs(5) {
+            // Shuffle cache in place
+            let mut rng = thread_rng();
+            addrs.ipv4.shuffle(&mut rng);
+            addrs.ipv6.shuffle(&mut rng);
+            addrs.shuffle_timestamp = time::Instant::now();
+        };
+
+        match question.qtype() {
+            Rtype::A => {
+                for (i, node) in addrs.ipv4.iter().enumerate() {
+                    if i >= 20 {
+                        break;
+                    }
+                    let rec = Record::new(
+                        name.to_name::<Vec<u8>>(),
+                        Class::IN,
+                        Ttl::from_secs(60),
+                        A::new(*node),
+                    );
+                    res.push(rec.clone()).unwrap();
+                    ans_recs_sign.add_a(rec);
+                }
+            }
+            Rtype::AAAA => {
+                for (i, node) in addrs.ipv6.iter().enumerate() {
+                    if i >= 20 {
+                        break;
+                    }
+                    let rec = Record::new(
+                        name.to_name::<Vec<u8>>(),
+                        Class::IN,
+                        Ttl::from_secs(60),
+                        Aaaa::new(*node),
+                    );
+                    res.push(rec.clone()).unwrap();
+                    ans_recs_sign.add_aaaa(rec);
+                }
+            }
+            _ => {
+                continue;
+            }
+        };
+    }
+
+    // Insert RRSIG if DNSSEC
+    if req.opt().is_some()
+        && req.opt().unwrap().dnssec_ok()
+        && res.counts().ancount() > 0
+        && !seeder.dnskeys.is_empty()
+    {
+        for rrsig in ans_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
+            let _ = res.push(rrsig);
+        }
+    }
+
+    // Advance to authority section
+    let mut auth = res.authority();
+
+    // Add SOA to authority section if there are no answers
+    if auth.counts().ancount() == 0 {
+        let mut auth_recs_sign = RecordsToSign::new();
+        auth.push(seeder.get_soa()).unwrap();
+        auth_recs_sign.add_soa(seeder.get_soa());
+
+        if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !seeder.dnskeys.is_empty() {
+            // Sign it
+            for rrsig in ans_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
+                let _ = auth.push(rrsig);
+            }
+        }
+    }
+
+    // Advance to additional section
+    let mut addl = auth.additional();
+
+    // Add OPT to our response if it is there
+    if req.opt().is_some() {
+        addl.opt(|opt| {
+            opt.set_rcode(Rcode::NOERROR.into());
+            if req.opt().unwrap().dnssec_ok() {
+                opt.set_dnssec_ok(true);
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    // Send response
+    let _ = sock.send_to(addl.into_message().as_slice(), from);
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn dns_thread(
     bind_addr: &str,
@@ -314,7 +614,7 @@ pub fn dns_thread(
     let mut cache = HashMap::<ServiceFlags, CachedAddrs>::new();
 
     // Setup seeder info
-    let seeder = SeederInfo::new(seed_domain, server_name, soa_rname, dnssec_keys);
+    let seeder = SeederInfo::new(seed_domain, server_name, soa_rname, dnssec_keys, *chain);
 
     // Bind socket
     let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
@@ -322,301 +622,10 @@ pub fn dns_thread(
 
     // Main loop
     loop {
-        let ret: Result<(), String> = (|| -> Result<(), String> {
-            // Handle queries
-            let mut buf = [0_u8; 1500];
-            let (req_len, from) = sock.recv_from(&mut buf).unwrap();
+        let mut buf = [0_u8; 1500];
+        let (req_len, from) = sock.recv_from(&mut buf).unwrap();
 
-            let req = match Message::from_slice(&buf[..req_len]) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(format!("E1 {}", e));
-                }
-            };
-
-            let req_header = req.header();
-            if req_header.qr() {
-                // Ignore non-queries
-                return Err("Ignored non-query".to_string());
-            }
-            if req_header.tc() {
-                send_dns_failed(&sock, req, Rcode::SERVFAIL, &from, &None, &seeder);
-                return Err("Received truncated, unsupported".to_string());
-            }
-
-            // Track records for signing
-            let mut ans_recs_sign = RecordsToSign::new();
-
-            // Answer the questions
-            let mut res_builder = MessageBuilder::new_vec();
-            res_builder.header_mut().set_aa(true);
-            let mut res = match res_builder.start_answer(req, Rcode::NOERROR) {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(format!("E3 {}", e));
-                }
-            };
-            for q_r in req.question() {
-                let question = match q_r {
-                    Ok(q) => q,
-                    Err(..) => {
-                        send_dns_failed(&sock, req, Rcode::FORMERR, &from, &None, &seeder);
-                        continue;
-                    }
-                };
-                let name = question.qname();
-
-                // Make sure we can serve this
-                if !name.ends_with(&seeder.seed_domain) {
-                    send_dns_failed(&sock, req, Rcode::REFUSED, &from, &Some(question), &seeder);
-                    continue;
-                }
-
-                // Check for xNNN.<name> service flag filter
-                let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-                if name.label_count() != seeder.seed_domain.label_count() {
-                    if name.label_count() != seeder.seed_domain.label_count() + 1 {
-                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from, &Some(question), &seeder);
-                        continue;
-                    }
-                    let filter_label = name.first().to_string();
-                    let this_filter = seeder.allowed_filters.get(&filter_label);
-                    if this_filter.is_none() {
-                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from, &Some(question), &seeder);
-                        continue;
-                    }
-                    filter = *this_filter.unwrap();
-                }
-
-                // Check supported class
-                match question.qclass() {
-                    Class::IN => (),
-                    _ => {
-                        send_dns_failed(&sock, req, Rcode::NOTIMP, &from, &Some(question), &seeder);
-                        continue;
-                    }
-                };
-
-                // Only return these for the apex domain
-                if name.eq(&seeder.seed_domain) {
-                    // Handle SOA separately
-                    if question.qtype() == Rtype::SOA {
-                        res.push(seeder.get_soa()).unwrap();
-                        ans_recs_sign.add_soa(seeder.get_soa());
-                        continue;
-                    };
-
-                    // Handle NS separately
-                    if question.qtype() == Rtype::NS {
-                        let rec = Record::new(
-                            name.to_name::<Vec<u8>>(),
-                            Class::IN,
-                            Ttl::from_secs(86400),
-                            Ns::new(seeder.server_name.clone()),
-                        );
-                        res.push(rec.clone()).unwrap();
-                        ans_recs_sign.add_ns(rec);
-                        continue;
-                    };
-
-                    // Handle DNSKEY separately
-                    if question.qtype() == Rtype::DNSKEY {
-                        for dnskey in seeder.dnskeys.values() {
-                            let rec = Record::new(
-                                name.to_name::<Vec<u8>>(),
-                                Class::IN,
-                                Ttl::from_secs(3600),
-                                dnskey.dnskey().unwrap(),
-                            );
-                            let _ = res.push(rec.clone());
-                            ans_recs_sign.add_dnskey(rec);
-                        }
-                        continue;
-                    }
-                }
-
-                // Check supported record type
-                match question.qtype() {
-                    Rtype::A => (),
-                    Rtype::AAAA => (),
-                    _ => {
-                        send_dns_failed(&sock, req, Rcode::NOERROR, &from, &Some(question), &seeder);
-                        continue;
-                    }
-                };
-
-                // Check or fill cache
-                let needs_refresh = match cache.get(&filter) {
-                    Some(c) => c.timestamp.elapsed() > time::Duration::from_secs(60 * 10),
-                    None => true,
-                };
-                if needs_refresh {
-                    let locked_db_conn = db_conn.lock().unwrap();
-                    let mut select_nodes = locked_db_conn
-                        .prepare("SELECT * FROM nodes WHERE try_count > 0 ORDER BY RANDOM()")
-                        .unwrap();
-                    let node_iter = select_nodes
-                        .query_map([], |r| {
-                            Ok(NodeInfo::construct(
-                                r.get(0)?,
-                                r.get(1)?,
-                                r.get(2)?,
-                                r.get(3)?,
-                                u64::from_be_bytes(r.get(4)?),
-                                r.get(5)?,
-                                r.get(6)?,
-                                r.get(7)?,
-                                r.get(8)?,
-                                r.get(9)?,
-                                r.get(10)?,
-                                r.get(11)?,
-                                r.get(12)?,
-                            ))
-                        })
-                        .unwrap();
-                    let nodes: Vec<NodeInfo> = node_iter
-                        .filter_map(|n| match n {
-                            Ok(ni) => match ni {
-                                Ok(nni) => {
-                                    if !is_good(&nni, chain)
-                                        || !ServiceFlags::from(nni.services).has(filter)
-                                    {
-                                        return None;
-                                    }
-                                    match nni.addr.host {
-                                        Host::Ipv4(..) => Some(nni),
-                                        Host::Ipv6(..) => Some(nni),
-                                        _ => None,
-                                    }
-                                }
-                                Err(e) => {
-                                    println!("E4 {}", e);
-                                    None
-                                }
-                            },
-                            Err(e) => {
-                                println!("E5 {}", e);
-                                None
-                            }
-                        })
-                        .collect();
-                    let mut new_cache = CachedAddrs::new();
-                    for n in nodes {
-                        match n.addr.host {
-                            Host::Ipv4(ip) => {
-                                new_cache.ipv4.push(ip);
-                            }
-                            Host::Ipv6(ip) => {
-                                new_cache.ipv6.push(ip);
-                            }
-                            _ => {
-                                continue;
-                            }
-                        };
-                    }
-                    cache.insert(filter, new_cache);
-                };
-
-                let addrs: &mut CachedAddrs = cache
-                    .get_mut(&filter)
-                    .expect("Cache should have some entries");
-
-                if addrs.shuffle_timestamp.elapsed() > time::Duration::from_secs(5) {
-                    // Shuffle cache in place
-                    let mut rng = thread_rng();
-                    addrs.ipv4.shuffle(&mut rng);
-                    addrs.ipv6.shuffle(&mut rng);
-                    addrs.shuffle_timestamp = time::Instant::now();
-                };
-
-                match question.qtype() {
-                    Rtype::A => {
-                        for (i, node) in addrs.ipv4.iter().enumerate() {
-                            if i >= 20 {
-                                break;
-                            }
-                            let rec = Record::new(
-                                name.to_name::<Vec<u8>>(),
-                                Class::IN,
-                                Ttl::from_secs(60),
-                                A::new(*node),
-                            );
-                            res.push(rec.clone()).unwrap();
-                            ans_recs_sign.add_a(rec);
-                        }
-                    }
-                    Rtype::AAAA => {
-                        for (i, node) in addrs.ipv6.iter().enumerate() {
-                            if i >= 20 {
-                                break;
-                            }
-                            let rec = Record::new(
-                                name.to_name::<Vec<u8>>(),
-                                Class::IN,
-                                Ttl::from_secs(60),
-                                Aaaa::new(*node),
-                            );
-                            res.push(rec.clone()).unwrap();
-                            ans_recs_sign.add_aaaa(rec);
-                        }
-                    }
-                    _ => {
-                        continue;
-                    }
-                };
-            }
-
-            // Insert RRSIG if DNSSEC
-            if req.opt().is_some()
-                && req.opt().unwrap().dnssec_ok()
-                && res.counts().ancount() > 0
-                && !seeder.dnskeys.is_empty()
-            {
-                for rrsig in ans_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
-                    let _ = res.push(rrsig);
-                }
-            }
-
-            // Advance to authority section
-            let mut auth = res.authority();
-
-            // Add SOA to authority section if there are no answers
-            if auth.counts().ancount() == 0 {
-                let mut auth_recs_sign = RecordsToSign::new();
-                auth.push(seeder.get_soa()).unwrap();
-                auth_recs_sign.add_soa(seeder.get_soa());
-
-                if req.opt().is_some()
-                    && req.opt().unwrap().dnssec_ok()
-                    && !seeder.dnskeys.is_empty()
-                {
-                    // Sign it
-                    for rrsig in ans_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
-                        let _ = auth.push(rrsig);
-                    }
-                }
-            }
-
-            // Advance to additional section
-            let mut addl = auth.additional();
-
-            // Add OPT to our response if it is there
-            if req.opt().is_some() {
-                addl.opt(|opt| {
-                    opt.set_rcode(Rcode::NOERROR.into());
-                    if req.opt().unwrap().dnssec_ok() {
-                        opt.set_dnssec_ok(true);
-                    }
-                    Ok(())
-                })
-                .unwrap();
-            }
-
-            // Send response
-            let _ = sock.send_to(addl.into_message().as_slice(), from);
-
-            Ok(())
-        })();
+        let ret = process_dns_request(&buf, req_len, from, &sock, &seeder, &mut cache, db_conn.clone());
 
         if let Err(e) = ret {
             println!("{}", e);
