@@ -8,9 +8,20 @@ use std::{
 
 use base64ct::{Base64, Encoding};
 use domain::{
-    base::{iana::SecAlg, name::ToName},
-    rdata::dnssec::{Dnskey, Ds},
-    sign::key::SigningKey,
+    base::{
+        iana::SecAlg,
+        name::{Name, ToName},
+        Record,
+    },
+    rdata::{
+        aaaa::Aaaa,
+        dnssec::{Dnskey, Ds, Nsec, Rrsig, Timestamp},
+        rfc1035::{Ns, Soa, A},
+    },
+    sign::{
+        key::SigningKey,
+        records::{FamilyName, SortedRecords},
+    },
 };
 use ring::{
     error::Unspecified,
@@ -150,4 +161,101 @@ pub fn parse_dns_keys_dir(
         }
     }
     dnskeys
+}
+
+type VecName = Name<Vec<u8>>;
+
+pub struct RecordsToSign {
+    soa_recs: SortedRecords<VecName, Soa<VecName>>,
+    a_recs: SortedRecords<VecName, A>,
+    aaaa_recs: SortedRecords<VecName, Aaaa>,
+    ns_recs: SortedRecords<VecName, Ns<VecName>>,
+    dnskey_recs: SortedRecords<VecName, Dnskey<Vec<u8>>>,
+    nsec_recs: SortedRecords<VecName, Nsec<Vec<u8>, VecName>>,
+}
+
+impl RecordsToSign {
+    pub fn new() -> RecordsToSign {
+        RecordsToSign {
+            soa_recs: SortedRecords::<VecName, Soa<VecName>>::new(),
+            a_recs: SortedRecords::<VecName, A>::new(),
+            aaaa_recs: SortedRecords::<VecName, Aaaa>::new(),
+            ns_recs: SortedRecords::<VecName, Ns<VecName>>::new(),
+            dnskey_recs: SortedRecords::<VecName, Dnskey<Vec<u8>>>::new(),
+            nsec_recs: SortedRecords::<VecName, Nsec<Vec<u8>, VecName>>::new(),
+        }
+    }
+
+    pub fn add_soa(&mut self, record: Record<VecName, Soa<VecName>>) {
+        let _ = self.soa_recs.insert(record);
+    }
+
+    pub fn add_a(&mut self, record: Record<VecName, A>) {
+        let _ = self.a_recs.insert(record);
+    }
+
+    pub fn add_aaaa(&mut self, record: Record<VecName, Aaaa>) {
+        let _ = self.aaaa_recs.insert(record);
+    }
+
+    pub fn add_ns(&mut self, record: Record<VecName, Ns<VecName>>) {
+        let _ = self.ns_recs.insert(record);
+    }
+
+    pub fn add_dnskey(&mut self, record: Record<VecName, Dnskey<Vec<u8>>>) {
+        let _ = self.dnskey_recs.insert(record);
+    }
+
+    pub fn add_nsec(&mut self, record: Record<VecName, Nsec<Vec<u8>, VecName>>) {
+        let _ = self.nsec_recs.insert(record);
+    }
+
+    pub fn sign(
+        &self,
+        dnskeys: &HashMap<(u16, SecAlg), DnsSigningKey>,
+        apex_name: &FamilyName<VecName>,
+    ) -> Vec<Record<VecName, Rrsig<Signature, VecName>>> {
+        let incep_ts = Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
+        let exp_ts = Timestamp::from(Timestamp::now().into_int().overflowing_add(86400 * 7).0);
+        let mut rrsigs = Vec::<Record<VecName, Rrsig<Signature, VecName>>>::new();
+
+        for ((flags, _), key) in dnskeys.iter() {
+            if *flags == 257 {
+                rrsigs.extend(
+                    self.dnskey_recs
+                        .sign::<Signature, &DnsSigningKey, VecName>(
+                            apex_name, exp_ts, incep_ts, key,
+                        )
+                        .unwrap(),
+                );
+                continue;
+            }
+            rrsigs.extend(
+                self.soa_recs
+                    .sign::<Signature, &DnsSigningKey, VecName>(apex_name, exp_ts, incep_ts, key)
+                    .unwrap(),
+            );
+            rrsigs.extend(
+                self.a_recs
+                    .sign::<Signature, &DnsSigningKey, VecName>(apex_name, exp_ts, incep_ts, key)
+                    .unwrap(),
+            );
+            rrsigs.extend(
+                self.aaaa_recs
+                    .sign::<Signature, &DnsSigningKey, VecName>(apex_name, exp_ts, incep_ts, key)
+                    .unwrap(),
+            );
+            rrsigs.extend(
+                self.ns_recs
+                    .sign::<Signature, &DnsSigningKey, VecName>(apex_name, exp_ts, incep_ts, key)
+                    .unwrap(),
+            );
+            rrsigs.extend(
+                self.nsec_recs
+                    .sign::<Signature, &DnsSigningKey, VecName>(apex_name, exp_ts, incep_ts, key)
+                    .unwrap(),
+            );
+        }
+        rrsigs
+    }
 }

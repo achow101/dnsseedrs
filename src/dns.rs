@@ -1,5 +1,5 @@
 use crate::common::{is_good, Host, NodeInfo};
-use crate::dnssec::{parse_dns_keys_dir, DnsSigningKey};
+use crate::dnssec::{parse_dns_keys_dir, DnsSigningKey, RecordsToSign};
 
 use std::{
     collections::HashMap,
@@ -22,16 +22,12 @@ use domain::{
     },
     rdata::{
         aaaa::Aaaa,
-        dnssec::{Dnskey, Nsec, RtypeBitmap, RtypeBitmapBuilder, Timestamp},
+        dnssec::{Nsec, RtypeBitmap, RtypeBitmapBuilder},
         rfc1035::{Ns, Soa, A},
     },
-    sign::{
-        key::SigningKey,
-        records::{FamilyName, SortedRecords},
-    },
+    sign::{key::SigningKey, records::FamilyName},
 };
 use rand::{seq::SliceRandom, thread_rng};
-use ring::signature::Signature;
 
 struct CachedAddrs {
     ipv4: Vec<Ipv4Addr>,
@@ -236,44 +232,16 @@ pub fn dns_thread(
 
                 // Add SOA record for only NOERROR and NXDOMAIN
                 if query.is_some() && (code == Rcode::NOERROR || code == Rcode::NXDOMAIN) {
-                    let mut soa_auth_recs_sign =
-                        SortedRecords::<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>::new();
+                    let mut auth_recs_sign = RecordsToSign::new();
                     auth.push(seeder.get_soa()).unwrap();
-                    let _ = soa_auth_recs_sign.insert(seeder.get_soa());
+                    auth_recs_sign.add_soa(seeder.get_soa());
 
                     // DNSSEC signing and NSEC records
                     if req.opt().is_some()
                         && req.opt().unwrap().dnssec_ok()
                         && !seeder.dnskeys.is_empty()
                     {
-                        let incep_ts =
-                            Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
-                        let exp_ts = Timestamp::from(
-                            Timestamp::now().into_int().overflowing_add(86400 * 7).0,
-                        );
-
-                        // Sign the SOA
-                        for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                            let key = seeder.dnskeys.get(&(256, algo));
-                            if key.is_none() {
-                                continue;
-                            }
-                            for rrsig in soa_auth_recs_sign
-                                .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                                    &seeder.seed_apex,
-                                    exp_ts,
-                                    incep_ts,
-                                    key.unwrap(),
-                                )
-                                .unwrap()
-                            {
-                                let _ = auth.push(rrsig);
-                            }
-                        }
-
                         // Set NSEC records
-                        let mut nsec_auth_recs_sign =
-                            SortedRecords::<&Name<Vec<u8>>, Nsec<Vec<u8>, &Name<Vec<u8>>>>::new();
                         let mut next_name;
                         let mut insert_apex = false;
                         match seeder
@@ -292,13 +260,16 @@ pub fn dns_thread(
                         // Insert NSEC for apex
                         if insert_apex || next_name == 1 {
                             let rec = Record::new(
-                                &seeder.names_served[0],
+                                seeder.names_served[0].clone(),
                                 Class::IN,
                                 Ttl::from_secs(60),
-                                Nsec::new(&seeder.names_served[1], seeder.apex_rtypes.clone()),
+                                Nsec::new(
+                                    seeder.names_served[1].clone(),
+                                    seeder.apex_rtypes.clone(),
+                                ),
                             );
                             auth.push(rec.clone()).unwrap();
-                            let _ = nsec_auth_recs_sign.insert(rec);
+                            auth_recs_sign.add_nsec(rec);
                         }
                         if next_name > 1 {
                             let prev_name = next_name - 1;
@@ -307,35 +278,21 @@ pub fn dns_thread(
                                 next_name = 0;
                             }
                             let rec = Record::new(
-                                &seeder.names_served[prev_name],
+                                seeder.names_served[prev_name].clone(),
                                 Class::IN,
                                 Ttl::from_secs(60),
                                 Nsec::new(
-                                    &seeder.names_served[next_name],
+                                    seeder.names_served[next_name].clone(),
                                     seeder.other_rtypes.clone(),
                                 ),
                             );
                             auth.push(rec.clone()).unwrap();
-                            let _ = nsec_auth_recs_sign.insert(rec);
+                            auth_recs_sign.add_nsec(rec);
                         }
 
-                        // Sign the NSECs
-                        for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                            let key = seeder.dnskeys.get(&(256, algo));
-                            if key.is_none() {
-                                continue;
-                            }
-                            for rrsig in nsec_auth_recs_sign
-                                .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                                    &seeder.seed_apex,
-                                    exp_ts,
-                                    incep_ts,
-                                    key.unwrap(),
-                                )
-                                .unwrap()
-                            {
-                                let _ = auth.push(rrsig);
-                            }
+                        // Sign
+                        for rrsig in auth_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
+                            let _ = auth.push(rrsig);
                         }
                     }
                 }
@@ -387,13 +344,7 @@ pub fn dns_thread(
             }
 
             // Track records for signing
-            let mut soa_ans_recs_sign = SortedRecords::<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>::new();
-            let mut a_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, A>::new();
-            let mut aaaa_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, Aaaa>::new();
-            let mut ns_ans_recs_sign =
-                SortedRecords::<ParsedName<&[u8]>, Ns<&Name<Vec<u8>>>>::new();
-            let mut dnskey_ans_recs_sign =
-                SortedRecords::<ParsedName<&[u8]>, Dnskey<Vec<u8>>>::new();
+            let mut ans_recs_sign = RecordsToSign::new();
 
             // Answer the questions
             let mut res_builder = MessageBuilder::new_vec();
@@ -450,20 +401,20 @@ pub fn dns_thread(
                     // Handle SOA separately
                     if question.qtype() == Rtype::SOA {
                         res.push(seeder.get_soa()).unwrap();
-                        let _ = soa_ans_recs_sign.insert(seeder.get_soa());
+                        ans_recs_sign.add_soa(seeder.get_soa());
                         continue;
                     };
 
                     // Handle NS separately
                     if question.qtype() == Rtype::NS {
                         let rec = Record::new(
-                            *name,
+                            name.to_name::<Vec<u8>>(),
                             Class::IN,
                             Ttl::from_secs(86400),
-                            Ns::new(&seeder.server_name),
+                            Ns::new(seeder.server_name.clone()),
                         );
                         res.push(rec.clone()).unwrap();
-                        let _ = ns_ans_recs_sign.insert(rec);
+                        ans_recs_sign.add_ns(rec);
                         continue;
                     };
 
@@ -471,13 +422,13 @@ pub fn dns_thread(
                     if question.qtype() == Rtype::DNSKEY {
                         for dnskey in seeder.dnskeys.values() {
                             let rec = Record::new(
-                                *name,
+                                name.to_name::<Vec<u8>>(),
                                 Class::IN,
                                 Ttl::from_secs(3600),
                                 dnskey.dnskey().unwrap(),
                             );
                             let _ = res.push(rec.clone());
-                            let _ = dnskey_ans_recs_sign.insert(rec);
+                            ans_recs_sign.add_dnskey(rec);
                         }
                         continue;
                     }
@@ -583,10 +534,14 @@ pub fn dns_thread(
                             if i >= 20 {
                                 break;
                             }
-                            let rec =
-                                Record::new(*name, Class::IN, Ttl::from_secs(60), A::new(*node));
+                            let rec = Record::new(
+                                name.to_name::<Vec<u8>>(),
+                                Class::IN,
+                                Ttl::from_secs(60),
+                                A::new(*node),
+                            );
                             res.push(rec.clone()).unwrap();
-                            let _ = a_ans_recs_sign.insert(rec);
+                            ans_recs_sign.add_a(rec);
                         }
                     }
                     Rtype::AAAA => {
@@ -594,10 +549,14 @@ pub fn dns_thread(
                             if i >= 20 {
                                 break;
                             }
-                            let rec =
-                                Record::new(*name, Class::IN, Ttl::from_secs(60), Aaaa::new(*node));
+                            let rec = Record::new(
+                                name.to_name::<Vec<u8>>(),
+                                Class::IN,
+                                Ttl::from_secs(60),
+                                Aaaa::new(*node),
+                            );
                             res.push(rec.clone()).unwrap();
-                            let _ = aaaa_ans_recs_sign.insert(rec);
+                            ans_recs_sign.add_aaaa(rec);
                         }
                     }
                     _ => {
@@ -612,80 +571,8 @@ pub fn dns_thread(
                 && res.counts().ancount() > 0
                 && !seeder.dnskeys.is_empty()
             {
-                let incep_ts =
-                    Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
-                let exp_ts =
-                    Timestamp::from(Timestamp::now().into_int().overflowing_add(86400 * 7).0);
-
-                // Sign zone records
-                for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                    let key = seeder.dnskeys.get(&(256, algo));
-                    if key.is_none() {
-                        continue;
-                    }
-                    for rrsig in soa_ans_recs_sign
-                        .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &seeder.seed_apex,
-                            exp_ts,
-                            incep_ts,
-                            key.unwrap(),
-                        )
-                        .unwrap()
-                    {
-                        let _ = res.push(rrsig);
-                    }
-                    for rrsig in a_ans_recs_sign
-                        .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &seeder.seed_apex,
-                            exp_ts,
-                            incep_ts,
-                            key.unwrap(),
-                        )
-                        .unwrap()
-                    {
-                        let _ = res.push(rrsig);
-                    }
-                    for rrsig in aaaa_ans_recs_sign
-                        .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &seeder.seed_apex,
-                            exp_ts,
-                            incep_ts,
-                            key.unwrap(),
-                        )
-                        .unwrap()
-                    {
-                        let _ = res.push(rrsig);
-                    }
-                    for rrsig in ns_ans_recs_sign
-                        .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &seeder.seed_apex,
-                            exp_ts,
-                            incep_ts,
-                            key.unwrap(),
-                        )
-                        .unwrap()
-                    {
-                        let _ = res.push(rrsig);
-                    }
-                }
-
-                // Sign key records
-                for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                    let key = seeder.dnskeys.get(&(257, algo));
-                    if key.is_none() {
-                        continue;
-                    }
-                    for rrsig in dnskey_ans_recs_sign
-                        .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                            &seeder.seed_apex,
-                            exp_ts,
-                            incep_ts,
-                            key.unwrap(),
-                        )
-                        .unwrap()
-                    {
-                        let _ = res.push(rrsig);
-                    }
+                for rrsig in ans_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
+                    let _ = res.push(rrsig);
                 }
             }
 
@@ -694,36 +581,17 @@ pub fn dns_thread(
 
             // Add SOA to authority section if there are no answers
             if auth.counts().ancount() == 0 {
-                let mut soa_auth_recs_sign =
-                    SortedRecords::<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>::new();
+                let mut auth_recs_sign = RecordsToSign::new();
                 auth.push(seeder.get_soa()).unwrap();
-                let _ = soa_auth_recs_sign.insert(seeder.get_soa());
+                auth_recs_sign.add_soa(seeder.get_soa());
 
                 if req.opt().is_some()
                     && req.opt().unwrap().dnssec_ok()
                     && !seeder.dnskeys.is_empty()
                 {
                     // Sign it
-                    let incep_ts =
-                        Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
-                    let exp_ts =
-                        Timestamp::from(Timestamp::now().into_int().overflowing_add(86400 * 7).0);
-                    for algo in [SecAlg::ECDSAP256SHA256, SecAlg::ED25519] {
-                        let key = seeder.dnskeys.get(&(256, algo));
-                        if key.is_none() {
-                            continue;
-                        }
-                        for rrsig in soa_auth_recs_sign
-                            .sign::<Signature, &DnsSigningKey, Name<Vec<u8>>>(
-                                &seeder.seed_apex,
-                                exp_ts,
-                                incep_ts,
-                                key.unwrap(),
-                            )
-                            .unwrap()
-                        {
-                            let _ = auth.push(rrsig);
-                        }
+                    for rrsig in ans_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
+                        let _ = auth.push(rrsig);
                     }
                 }
             }
