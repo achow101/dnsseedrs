@@ -1,6 +1,7 @@
 mod common;
 mod crawl;
 mod dns;
+mod dnssec;
 mod dump;
 
 use crate::{common::NetStatus, crawl::crawler_thread, dns::dns_thread, dump::dumper_thread};
