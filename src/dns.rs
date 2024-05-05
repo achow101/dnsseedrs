@@ -2,7 +2,7 @@ use crate::common::{is_good, Host, NodeInfo};
 
 use std::{
     collections::HashMap,
-    fs::{File, read_dir},
+    fs::{read_dir, File},
     io::{BufRead, BufReader},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     path::Path,
@@ -36,8 +36,8 @@ use domain::{
 use rand::{seq::SliceRandom, thread_rng};
 use ring::{
     error::Unspecified,
-    signature::{EcdsaKeyPair, Ed25519KeyPair, Signature, ECDSA_P256_SHA256_FIXED_SIGNING},
     rand::SystemRandom,
+    signature::{EcdsaKeyPair, Ed25519KeyPair, Signature, ECDSA_P256_SHA256_FIXED_SIGNING},
 };
 
 struct CachedAddrs {

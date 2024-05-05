@@ -1,7 +1,9 @@
-use bitcoin::network::Network;
-use bitcoin::p2p::ServiceFlags;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::str::FromStr;
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    str::FromStr,
+};
+
+use bitcoin::{network::Network, p2p::ServiceFlags};
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -233,4 +235,14 @@ pub fn is_good(node: &NodeInfo, chain: &Network) -> bool {
     }
 
     false
+}
+
+#[derive(Clone)]
+pub struct NetStatus {
+    pub chain: Network,
+    pub ipv4: bool,
+    pub ipv6: bool,
+    pub cjdns: bool,
+    pub onion_proxy: Option<String>,
+    pub i2p_proxy: Option<String>,
 }
