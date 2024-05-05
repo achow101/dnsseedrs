@@ -125,21 +125,27 @@ impl SigningKey for DnsSigningKey {
 }
 
 struct SeederInfo {
+    // Static, setup on init and never changes
     seed_domain: Name<Vec<u8>>,
     seed_apex: FamilyName<Name<Vec<u8>>>,
     server_name: Name<Vec<u8>>,
-    soa_rname: Name<Vec<u8>>,
     dnskeys: HashMap<(u16, SecAlg), DnsSigningKey>,
     names_served: Vec<Name<Vec<u8>>>,
+    soa_record: Record<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>,
 
-    // Basically static, setup on init and never changed
+    // Consts, but can't make them compile time.
     allowed_filters: HashMap<String, ServiceFlags>,
     apex_rtypes: RtypeBitmap<Vec<u8>>,
     other_rtypes: RtypeBitmap<Vec<u8>>,
 }
 
 impl SeederInfo {
-    fn new(seed_name: &str, server_name: &str, soa_rname: &str, dnskeys_dir: Option<String>) -> SeederInfo {
+    fn new(
+        seed_name: &str,
+        server_name: &str,
+        soa_rname: &str,
+        dnskeys_dir: Option<String>,
+    ) -> SeederInfo {
         // Parse the name strings
         let seed_domain_dname: Name<Vec<u8>> = Name::from_str(seed_name).unwrap();
         let seed_apex = FamilyName::new(seed_domain_dname.clone(), Class::IN);
@@ -187,7 +193,9 @@ impl SeederInfo {
             ),
             (
                 "x448".to_string(),
-                ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS | ServiceFlags::COMPACT_FILTERS,
+                ServiceFlags::NETWORK_LIMITED
+                    | ServiceFlags::WITNESS
+                    | ServiceFlags::COMPACT_FILTERS,
             ),
             (
                 "xc08".to_string(),
@@ -293,17 +301,37 @@ impl SeederInfo {
             }
         }
 
-        SeederInfo{
+        // Make static SOA record
+        let soa_record = Record::new(
+            seed_domain_dname.clone(),
+            Class::IN,
+            Ttl::from_secs(900),
+            Soa::new(
+                seed_domain_dname.clone(),
+                soa_rname_dname,
+                Serial(1),
+                Ttl::from_secs(3600),
+                Ttl::from_secs(3600),
+                Ttl::from_secs(86400),
+                Ttl::from_secs(60),
+            ),
+        );
+
+        SeederInfo {
             seed_domain: seed_domain_dname,
-            seed_apex: seed_apex,
+            seed_apex,
             server_name: server_dname,
-            soa_rname: soa_rname_dname,
-            dnskeys: dnskeys,
-            names_served: names_served,
-            allowed_filters: allowed_filters,
+            dnskeys,
+            names_served,
+            soa_record,
+            allowed_filters,
             apex_rtypes: apex_rtype_builder.finalize(),
             other_rtypes: other_rtype_builder.finalize(),
         }
+    }
+
+    fn get_soa(&self) -> Record<Name<Vec<u8>>, Soa<Name<Vec<u8>>>> {
+        self.soa_record.clone()
     }
 }
 
@@ -342,26 +370,14 @@ pub fn dns_thread(
                 // Add SOA record for only NOERROR and NXDOMAIN
                 if query.is_some() && (code == Rcode::NOERROR || code == Rcode::NXDOMAIN) {
                     let mut soa_auth_recs_sign =
-                        SortedRecords::<&Name<Vec<u8>>, Soa<&Name<Vec<u8>>>>::new();
-                    let rec = Record::new(
-                        &seeder.server_name,
-                        Class::IN,
-                        Ttl::from_secs(900),
-                        Soa::new(
-                            &seeder.server_name,
-                            &seeder.soa_rname,
-                            Serial(1),
-                            Ttl::from_secs(3600),
-                            Ttl::from_secs(3600),
-                            Ttl::from_secs(86400),
-                            Ttl::from_secs(60),
-                        ),
-                    );
-                    auth.push(rec.clone()).unwrap();
-                    let _ = soa_auth_recs_sign.insert(rec);
+                        SortedRecords::<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>::new();
+                    auth.push(seeder.get_soa()).unwrap();
+                    let _ = soa_auth_recs_sign.insert(seeder.get_soa());
 
                     // DNSSEC signing and NSEC records
-                    if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !seeder.dnskeys.is_empty()
+                    if req.opt().is_some()
+                        && req.opt().unwrap().dnssec_ok()
+                        && !seeder.dnskeys.is_empty()
                     {
                         let incep_ts =
                             Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
@@ -393,7 +409,8 @@ pub fn dns_thread(
                             SortedRecords::<&Name<Vec<u8>>, Nsec<Vec<u8>, &Name<Vec<u8>>>>::new();
                         let mut next_name;
                         let mut insert_apex = false;
-                        match seeder.names_served
+                        match seeder
+                            .names_served
                             .binary_search_by(|a| a.canonical_cmp(&query.unwrap().qname()))
                         {
                             Ok(p) => {
@@ -426,7 +443,10 @@ pub fn dns_thread(
                                 &seeder.names_served[prev_name],
                                 Class::IN,
                                 Ttl::from_secs(60),
-                                Nsec::new(&seeder.names_served[next_name], seeder.other_rtypes.clone()),
+                                Nsec::new(
+                                    &seeder.names_served[next_name],
+                                    seeder.other_rtypes.clone(),
+                                ),
                             );
                             auth.push(rec.clone()).unwrap();
                             let _ = nsec_auth_recs_sign.insert(rec);
@@ -500,8 +520,7 @@ pub fn dns_thread(
             }
 
             // Track records for signing
-            let mut soa_ans_recs_sign =
-                SortedRecords::<ParsedName<&[u8]>, Soa<&Name<Vec<u8>>>>::new();
+            let mut soa_ans_recs_sign = SortedRecords::<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>::new();
             let mut a_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, A>::new();
             let mut aaaa_ans_recs_sign = SortedRecords::<ParsedName<&[u8]>, Aaaa>::new();
             let mut ns_ans_recs_sign =
@@ -563,22 +582,8 @@ pub fn dns_thread(
                 if name.eq(&seeder.seed_domain) {
                     // Handle SOA separately
                     if question.qtype() == Rtype::SOA {
-                        let rec = Record::new(
-                            *name,
-                            Class::IN,
-                            Ttl::from_secs(900),
-                            Soa::new(
-                                &seeder.server_name,
-                                &seeder.soa_rname,
-                                Serial(1),
-                                Ttl::from_secs(3600),
-                                Ttl::from_secs(3600),
-                                Ttl::from_secs(86400),
-                                Ttl::from_secs(60),
-                            ),
-                        );
-                        res.push(rec.clone()).unwrap();
-                        let _ = soa_ans_recs_sign.insert(rec);
+                        res.push(seeder.get_soa()).unwrap();
+                        let _ = soa_ans_recs_sign.insert(seeder.get_soa());
                         continue;
                     };
 
@@ -823,25 +828,14 @@ pub fn dns_thread(
             // Add SOA to authority section if there are no answers
             if auth.counts().ancount() == 0 {
                 let mut soa_auth_recs_sign =
-                    SortedRecords::<&Name<Vec<u8>>, Soa<&Name<Vec<u8>>>>::new();
-                let rec = Record::new(
-                    &seeder.server_name,
-                    Class::IN,
-                    Ttl::from_secs(900),
-                    Soa::new(
-                        &seeder.server_name,
-                        &seeder.soa_rname,
-                        Serial(1),
-                        Ttl::from_secs(3600),
-                        Ttl::from_secs(3600),
-                        Ttl::from_secs(86400),
-                        Ttl::from_secs(60),
-                    ),
-                );
-                auth.push(rec.clone()).unwrap();
-                let _ = soa_auth_recs_sign.insert(rec);
+                    SortedRecords::<Name<Vec<u8>>, Soa<Name<Vec<u8>>>>::new();
+                auth.push(seeder.get_soa()).unwrap();
+                let _ = soa_auth_recs_sign.insert(seeder.get_soa());
 
-                if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !seeder.dnskeys.is_empty() {
+                if req.opt().is_some()
+                    && req.opt().unwrap().dnssec_ok()
+                    && !seeder.dnskeys.is_empty()
+                {
                     // Sign it
                     let incep_ts =
                         Timestamp::from(Timestamp::now().into_int().overflowing_sub(43200).0);
