@@ -21,4 +21,4 @@ tar = "0.4.40"
 threadpool = "1.8.1"
 
 [patch.crates-io]
-domain = { git = "https://github.com/achow101/domain", branch = "pub-familyname" }
+domain = { git = "https://github.com/achow101/domain", branch = "achow-fixes" }
