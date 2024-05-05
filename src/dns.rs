@@ -198,6 +198,107 @@ impl SeederInfo {
     }
 }
 
+fn send_dns_failed( 
+    sock: &UdpSocket,
+    req: &Message<[u8]>,
+    code: Rcode,
+    from: &SocketAddr,
+    query: &Option<Question<ParsedName<&[u8]>>>,
+    seeder: &SeederInfo,
+) {
+    let res_builder = MessageBuilder::new_vec();
+    match res_builder.start_answer(req, code) {
+        Ok(res) => {
+            // No answer, skip directly to authority
+            let mut auth = res.authority();
+
+            // Add SOA record for only NOERROR and NXDOMAIN
+            if query.is_some() && (code == Rcode::NOERROR || code == Rcode::NXDOMAIN) {
+                auth.header_mut().set_aa(true);
+                let mut auth_recs_sign = RecordsToSign::new();
+                auth.push(seeder.get_soa()).unwrap();
+                auth_recs_sign.add_soa(seeder.get_soa());
+
+                // DNSSEC signing and NSEC records
+                if req.opt().is_some()
+                    && req.opt().unwrap().dnssec_ok()
+                    && !seeder.dnskeys.is_empty()
+                {
+                    // Set NSEC records
+                    let mut next_name;
+                    let mut insert_apex = false;
+                    match seeder
+                        .names_served
+                        .binary_search_by(|a| a.canonical_cmp(&query.unwrap().qname()))
+                    {
+                        Ok(p) => {
+                            next_name = p + 1;
+                        }
+                        Err(p) => {
+                            next_name = p;
+                            // Insert apex if there is no exact match
+                            insert_apex = true
+                        }
+                    };
+                    // Insert NSEC for apex
+                    if insert_apex || next_name == 1 {
+                        let rec = Record::new(
+                            seeder.names_served[0].clone(),
+                            Class::IN,
+                            Ttl::from_secs(60),
+                            Nsec::new(seeder.names_served[1].clone(), seeder.apex_rtypes.clone()),
+                        );
+                        auth.push(rec.clone()).unwrap();
+                        auth_recs_sign.add_nsec(rec);
+                    }
+                    if next_name > 1 {
+                        let prev_name = next_name - 1;
+                        // When next_name is out of range, it wraps around
+                        if next_name >= seeder.names_served.len() {
+                            next_name = 0;
+                        }
+                        let rec = Record::new(
+                            seeder.names_served[prev_name].clone(),
+                            Class::IN,
+                            Ttl::from_secs(60),
+                            Nsec::new(
+                                seeder.names_served[next_name].clone(),
+                                seeder.other_rtypes.clone(),
+                            ),
+                        );
+                        auth.push(rec.clone()).unwrap();
+                        auth_recs_sign.add_nsec(rec);
+                    }
+
+                    // Sign
+                    for rrsig in auth_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
+                        let _ = auth.push(rrsig);
+                    }
+                }
+            }
+
+            // Additional section
+            let mut addl = auth.additional();
+            if req.opt().is_some() {
+                addl.opt(|opt| {
+                    opt.set_rcode(code.into());
+                    if req.opt().unwrap().dnssec_ok() {
+                        opt.set_dnssec_ok(true);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }
+
+            // Send
+            let _ = sock.send_to(addl.into_message().as_slice(), from);
+        }
+        Err(e) => {
+            println!("Failed to send DNS no data: {}", e);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn dns_thread(
     bind_addr: &str,
@@ -219,107 +320,6 @@ pub fn dns_thread(
     let sock = UdpSocket::bind((bind_addr, bind_port)).unwrap();
     println!("Bound socket");
 
-    // Closure for handling failures
-    let send_dns_failed = |req: &Message<[u8]>,
-                           code: Rcode,
-                           from: &SocketAddr,
-                           query: &Option<Question<ParsedName<&[u8]>>>| {
-        let res_builder = MessageBuilder::new_vec();
-        match res_builder.start_answer(req, code) {
-            Ok(res) => {
-                // No answer, skip directly to authority
-                let mut auth = res.authority();
-
-                // Add SOA record for only NOERROR and NXDOMAIN
-                if query.is_some() && (code == Rcode::NOERROR || code == Rcode::NXDOMAIN) {
-                    auth.header_mut().set_aa(true);
-                    let mut auth_recs_sign = RecordsToSign::new();
-                    auth.push(seeder.get_soa()).unwrap();
-                    auth_recs_sign.add_soa(seeder.get_soa());
-
-                    // DNSSEC signing and NSEC records
-                    if req.opt().is_some()
-                        && req.opt().unwrap().dnssec_ok()
-                        && !seeder.dnskeys.is_empty()
-                    {
-                        // Set NSEC records
-                        let mut next_name;
-                        let mut insert_apex = false;
-                        match seeder
-                            .names_served
-                            .binary_search_by(|a| a.canonical_cmp(&query.unwrap().qname()))
-                        {
-                            Ok(p) => {
-                                next_name = p + 1;
-                            }
-                            Err(p) => {
-                                next_name = p;
-                                // Insert apex if there is no exact match
-                                insert_apex = true
-                            }
-                        };
-                        // Insert NSEC for apex
-                        if insert_apex || next_name == 1 {
-                            let rec = Record::new(
-                                seeder.names_served[0].clone(),
-                                Class::IN,
-                                Ttl::from_secs(60),
-                                Nsec::new(
-                                    seeder.names_served[1].clone(),
-                                    seeder.apex_rtypes.clone(),
-                                ),
-                            );
-                            auth.push(rec.clone()).unwrap();
-                            auth_recs_sign.add_nsec(rec);
-                        }
-                        if next_name > 1 {
-                            let prev_name = next_name - 1;
-                            // When next_name is out of range, it wraps around
-                            if next_name >= seeder.names_served.len() {
-                                next_name = 0;
-                            }
-                            let rec = Record::new(
-                                seeder.names_served[prev_name].clone(),
-                                Class::IN,
-                                Ttl::from_secs(60),
-                                Nsec::new(
-                                    seeder.names_served[next_name].clone(),
-                                    seeder.other_rtypes.clone(),
-                                ),
-                            );
-                            auth.push(rec.clone()).unwrap();
-                            auth_recs_sign.add_nsec(rec);
-                        }
-
-                        // Sign
-                        for rrsig in auth_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
-                            let _ = auth.push(rrsig);
-                        }
-                    }
-                }
-
-                // Additional section
-                let mut addl = auth.additional();
-                if req.opt().is_some() {
-                    addl.opt(|opt| {
-                        opt.set_rcode(code.into());
-                        if req.opt().unwrap().dnssec_ok() {
-                            opt.set_dnssec_ok(true);
-                        }
-                        Ok(())
-                    })
-                    .unwrap();
-                }
-
-                // Send
-                let _ = sock.send_to(addl.into_message().as_slice(), from);
-            }
-            Err(e) => {
-                println!("Failed to send DNS no data: {}", e);
-            }
-        }
-    };
-
     // Main loop
     loop {
         let ret: Result<(), String> = (|| -> Result<(), String> {
@@ -340,7 +340,7 @@ pub fn dns_thread(
                 return Err("Ignored non-query".to_string());
             }
             if req_header.tc() {
-                send_dns_failed(req, Rcode::SERVFAIL, &from, &None);
+                send_dns_failed(&sock, req, Rcode::SERVFAIL, &from, &None, &seeder);
                 return Err("Received truncated, unsupported".to_string());
             }
 
@@ -360,7 +360,7 @@ pub fn dns_thread(
                 let question = match q_r {
                     Ok(q) => q,
                     Err(..) => {
-                        send_dns_failed(req, Rcode::FORMERR, &from, &None);
+                        send_dns_failed(&sock, req, Rcode::FORMERR, &from, &None, &seeder);
                         continue;
                     }
                 };
@@ -368,7 +368,7 @@ pub fn dns_thread(
 
                 // Make sure we can serve this
                 if !name.ends_with(&seeder.seed_domain) {
-                    send_dns_failed(req, Rcode::REFUSED, &from, &Some(question));
+                    send_dns_failed(&sock, req, Rcode::REFUSED, &from, &Some(question), &seeder);
                     continue;
                 }
 
@@ -376,13 +376,13 @@ pub fn dns_thread(
                 let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
                 if name.label_count() != seeder.seed_domain.label_count() {
                     if name.label_count() != seeder.seed_domain.label_count() + 1 {
-                        send_dns_failed(req, Rcode::NXDOMAIN, &from, &Some(question));
+                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from, &Some(question), &seeder);
                         continue;
                     }
                     let filter_label = name.first().to_string();
                     let this_filter = seeder.allowed_filters.get(&filter_label);
                     if this_filter.is_none() {
-                        send_dns_failed(req, Rcode::NXDOMAIN, &from, &Some(question));
+                        send_dns_failed(&sock, req, Rcode::NXDOMAIN, &from, &Some(question), &seeder);
                         continue;
                     }
                     filter = *this_filter.unwrap();
@@ -392,7 +392,7 @@ pub fn dns_thread(
                 match question.qclass() {
                     Class::IN => (),
                     _ => {
-                        send_dns_failed(req, Rcode::NOTIMP, &from, &Some(question));
+                        send_dns_failed(&sock, req, Rcode::NOTIMP, &from, &Some(question), &seeder);
                         continue;
                     }
                 };
@@ -440,7 +440,7 @@ pub fn dns_thread(
                     Rtype::A => (),
                     Rtype::AAAA => (),
                     _ => {
-                        send_dns_failed(req, Rcode::NOERROR, &from, &Some(question));
+                        send_dns_failed(&sock, req, Rcode::NOERROR, &from, &Some(question), &seeder);
                         continue;
                     }
                 };
