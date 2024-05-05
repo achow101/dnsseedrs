@@ -1,2 +1,5 @@
 **/target
-**/sqlite.db
+**/sqlite.db*
+**/seeds.txt*
+**/K*.key
+**/K*.private
