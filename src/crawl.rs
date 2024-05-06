@@ -373,7 +373,7 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
             )
             .await
             .unwrap();
-            if stream.is_err() {
+            if stream.is_ok() {
                 let cr = socks5_connect(stream.as_mut().unwrap(), host, node.addr.port).await;
                 match cr {
                     Ok(..) => stream,
