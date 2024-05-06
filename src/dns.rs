@@ -3,7 +3,7 @@ use crate::dnssec::{parse_dns_keys_dir, DnsSigningKey, RecordsToSign};
 
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::{Arc, Mutex, RwLock},
     time,
@@ -28,7 +28,11 @@ use domain::{
     sign::{key::SigningKey, records::FamilyName},
 };
 use rand::{seq::SliceRandom, thread_rng};
-use tokio::net::UdpSocket;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
+    net::{TcpListener, UdpSocket},
+    time::timeout,
+};
 
 #[derive(Clone)]
 struct CachedAddrs {
@@ -644,29 +648,98 @@ pub async fn dns_thread(
         *chain,
     ));
 
-    // Bind socket
-    let sock = Arc::new(UdpSocket::bind((bind_addr, bind_port)).await.unwrap());
-    println!("Bound socket");
+    let bindpoint = SocketAddr::new(IpAddr::from_str(bind_addr).unwrap(), bind_port);
+
+    // Start a task for the UDP socket
+    let seeder_clone = seeder.clone();
+    let cache_clone = cache.clone();
+    let db_conn_clone = db_conn.clone();
+    tokio::spawn(async move {
+        // Bind UDP socket
+        let udp_sock = Arc::new(UdpSocket::bind(bindpoint).await.unwrap());
+        println!("Bound UDP socket");
+
+        // Main loop
+        loop {
+            let mut buf = [0_u8; 1500];
+            let (req_len, from) = udp_sock.recv_from(&mut buf).await.unwrap();
+
+            let udp_sock_clone = udp_sock.clone();
+            let seeder_clone2 = seeder_clone.clone();
+            let cache_clone2 = cache_clone.clone();
+            let db_conn_clone2 = db_conn_clone.clone();
+            tokio::spawn(async move {
+                match process_dns_request(
+                    &buf,
+                    req_len,
+                    seeder_clone2,
+                    cache_clone2,
+                    db_conn_clone2,
+                )
+                .await
+                {
+                    Ok(msgs) => {
+                        // Send each message individually
+                        for msg in msgs {
+                            let _ = udp_sock_clone.send_to(msg.as_slice(), from).await;
+                        }
+                    }
+                    Err(e) => println!("{}", e),
+                }
+            });
+        }
+    });
+
+    // Use current task for TCP socket
+    // Bind TCP Socket
+    let tcp_sock = TcpListener::bind(bindpoint).await.unwrap();
+    println!("Bound TCP socket");
 
     // Main loop
     loop {
-        let mut buf = [0_u8; 1500];
-        let (req_len, from) = sock.recv_from(&mut buf).await.unwrap();
+        let (mut tcp_stream, _from) = tcp_sock.accept().await.unwrap();
 
-        let sock_clone = sock.clone();
         let seeder_clone = seeder.clone();
         let cache_clone = cache.clone();
         let db_conn_clone = db_conn.clone();
         tokio::spawn(async move {
-            match process_dns_request(&buf, req_len, seeder_clone, cache_clone, db_conn_clone).await
-            {
-                Ok(msgs) => {
-                    // Send each message individually
-                    for msg in msgs {
-                        let _ = sock_clone.send_to(msg.as_slice(), from).await;
-                    }
+            let (mut read_sock, mut write_sock) = tcp_stream.split();
+            let mut reader = BufReader::new(&mut read_sock);
+            let mut writer = BufWriter::new(&mut write_sock);
+
+            // Loop to handle all possible requests
+            loop {
+                // If we either get EOF, or it's been 2 minutes without data, exit
+                let req_len;
+                match timeout(time::Duration::from_secs(120), reader.read_u16()).await {
+                    Ok(rb) => match rb {
+                        Ok(r) => req_len = r,
+                        Err(_) => break,
+                    },
+                    Err(_) => break,
                 }
-                Err(e) => println!("{}", e),
+                let mut req = vec![0_u8; req_len as usize];
+                reader.read_exact(&mut req).await.unwrap();
+
+                match process_dns_request(
+                    req.as_slice(),
+                    req_len.into(),
+                    seeder_clone.clone(),
+                    cache_clone.clone(),
+                    db_conn_clone.clone(),
+                )
+                .await
+                {
+                    Ok(msgs) => {
+                        // Send each message individually
+                        for msg in msgs {
+                            writer.write_u16(msg.as_octets().len() as u16).await.unwrap();
+                            writer.write_all(msg.as_slice()).await.unwrap();
+                        }
+                        writer.flush().await.unwrap();
+                    }
+                    Err(e) => println!("{}", e),
+                }
             }
         });
     }
