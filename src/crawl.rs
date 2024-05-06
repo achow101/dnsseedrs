@@ -1,15 +1,11 @@
-use crate::common::{Host, NetStatus, NodeAddress, NodeInfo};
+use crate::common::{Host, NetStatus, NodeInfo};
 
 use std::{
-    collections::HashSet,
     io::{BufReader, BufWriter, Read, Write},
     net::{IpAddr, Shutdown, SocketAddr, TcpStream},
     str::FromStr,
-    sync::{
-        mpsc::{sync_channel, SyncSender},
-        Arc, Mutex,
-    },
-    thread, time,
+    sync::{Arc, Mutex},
+    time,
 };
 
 use base32ct::{Base32Unpadded, Encoding};
@@ -22,10 +18,9 @@ use bitcoin::{
         ServiceFlags,
     },
 };
-use crossbeam::queue::ArrayQueue;
 use rusqlite::params;
 use sha3::{Digest, Sha3_256};
-use threadpool::ThreadPool;
+use tokio::sync::Semaphore;
 
 struct CrawlInfo {
     node_info: NodeInfo,
@@ -96,12 +91,13 @@ fn socks5_connect(sock: &TcpStream, destination: &String, port: u16) -> Result<(
     Ok(())
 }
 
-fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status: NetStatus) {
+fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> {
     let tried_timestamp = time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let age = tried_timestamp - node.last_tried;
+    let mut ret_addrs = Vec::<CrawledNode>::new();
 
     let sock_res = match node.addr.host {
         Host::Ipv4(ip) if net_status.ipv4 => TcpStream::connect_timeout(
@@ -153,10 +149,8 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     if sock_res.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
-        send_channel
-            .send(CrawledNode::Failed(CrawlInfo { node_info, age }))
-            .unwrap();
-        return;
+        ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+        return ret_addrs;
     }
     let sock = sock_res.unwrap();
 
@@ -247,15 +241,10 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                     new_info.services = ver.services.to_u64();
                     new_info.starting_height = ver.start_height;
                     new_info.protocol_version = ver.version;
-                    match send_channel.send(CrawledNode::UpdatedInfo(CrawlInfo {
+                    ret_addrs.push(CrawledNode::UpdatedInfo(CrawlInfo {
                         node_info: new_info,
                         age,
-                    })) {
-                        Ok(..) => (),
-                        Err(e) => {
-                            return Err(std::io::Error::other(e.to_string()));
-                        }
-                    };
+                    }));
                 }
                 NetworkMessage::Addr(addrs) => {
                     println!("Received addrv1 from {}", &node.addr.to_string());
@@ -263,15 +252,10 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                         if let Ok(s) = a.socket_addr() {
                             if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
                                 new_info.services = a.services.to_u64();
-                                match send_channel.send(CrawledNode::NewNode(CrawlInfo {
+                                ret_addrs.push(CrawledNode::NewNode(CrawlInfo {
                                     node_info: new_info,
                                     age: 0,
-                                })) {
-                                    Ok(..) => (),
-                                    Err(e) => {
-                                        return Err(std::io::Error::other(e.to_string()));
-                                    }
-                                };
+                                }));
                             }
                         };
                     }
@@ -321,15 +305,10 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
                             Ok(s) => {
                                 if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
                                     new_info.services = a.services.to_u64();
-                                    match send_channel.send(CrawledNode::NewNode(CrawlInfo {
+                                    ret_addrs.push(CrawledNode::NewNode(CrawlInfo {
                                         node_info: new_info,
                                         age: 0,
-                                    })) {
-                                        Ok(..) => (),
-                                        Err(e) => {
-                                            return Err(std::io::Error::other(e.to_string()));
-                                        }
-                                    };
+                                    }));
                                 }
                             }
                             Err(e) => println!("Error: {}", e),
@@ -351,14 +330,11 @@ fn crawl_node(send_channel: SyncSender<CrawledNode>, node: NodeInfo, net_status:
     if ret.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
-        send_channel
-            .send(CrawledNode::Failed(CrawlInfo { node_info, age }))
-            .unwrap();
+        ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
     }
 
-    if let Err(e) = sock.shutdown(Shutdown::Both) {
-        eprintln!("Error shutting down socket: {}", e);
-    }
+    let _ = sock.shutdown(Shutdown::Both);
+    ret_addrs
 }
 
 fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64) -> f64 {
@@ -367,7 +343,7 @@ fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64
     (alpha * x) + ((1.0 - alpha) * old_reliability) // alpha * x + (1 - alpha) * s_{t-1}
 }
 
-pub fn crawler_thread(
+pub async fn crawler_thread(
     db_conn: Arc<Mutex<rusqlite::Connection>>,
     threads: usize,
     mut net_status: NetStatus,
@@ -423,105 +399,12 @@ pub fn crawler_thread(
         None => println!("I2P proxy bad"),
     }
 
-    // Setup thread pool with one less than specified to account for this thread.
-    let pool = ThreadPool::new(threads - 1);
+    // Semaphore to limit how many tasks are spawned
+    let sem = Arc::new(Semaphore::new(threads));
 
-    // Shared between fetcher and finisher thread
-    let nodes_in_flight: Arc<Mutex<HashSet<NodeAddress>>> = Arc::new(Mutex::new(HashSet::new()));
-
-    // Finisher thread to receive newly found addrs and update node info and try
-    let (tx, rx) = sync_channel::<CrawledNode>(threads * 1000 * 2);
-    let f_db_conn = db_conn.clone();
-    let f_nin_flight = nodes_in_flight.clone();
-    pool.execute(move || {
-        let mut i = 0;
-        loop {
-            let crawled = rx.recv().unwrap();
-            let locked_db_conn = f_db_conn.lock().unwrap();
-            if i == 0 {
-                locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
-            }
-            if i == 500 {
-                locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
-                i = -1;
-            }
-            match crawled {
-                CrawledNode::Failed(info) => {
-                    locked_db_conn.execute("
-                        UPDATE nodes SET
-                            last_tried = ?,
-                            try_count = ?,
-                            reliability_2h = ?,
-                            reliability_8h = ?,
-                            reliability_1d = ?,
-                            reliability_1w = ?,
-                            reliability_1m = ?
-                        WHERE address = ?",
-                        params![
-                            info.node_info.last_tried,
-                            info.node_info.try_count + 1,
-                            calculate_reliability(false, info.node_info.reliability_2h, info.age, 3600 * 2),
-                            calculate_reliability(false, info.node_info.reliability_8h, info.age, 3600 * 8),
-                            calculate_reliability(false, info.node_info.reliability_1d, info.age, 3600 * 24),
-                            calculate_reliability(false, info.node_info.reliability_1w, info.age, 3600 * 24 * 7),
-                            calculate_reliability(false, info.node_info.reliability_1m, info.age, 3600 * 24 * 30),
-                            info.node_info.addr.to_string(),
-                        ]
-                    ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr);
-                },
-                CrawledNode::UpdatedInfo(info) => {
-                    locked_db_conn.execute(
-                        "UPDATE nodes SET
-                            last_tried = ?,
-                            last_seen = ?,
-                            user_agent = ?,
-                            services = ?,
-                            starting_height = ?,
-                            protocol_version = ?,
-                            try_count = ?,
-                            reliability_2h = ?,
-                            reliability_8h = ?,
-                            reliability_1d = ?,
-                            reliability_1w = ?,
-                            reliability_1m = ?
-                        WHERE address = ?",
-                        params![
-                            info.node_info.last_tried,
-                            info.node_info.last_seen,
-                            info.node_info.user_agent,
-                            info.node_info.services.to_be_bytes(),
-                            info.node_info.starting_height,
-                            info.node_info.protocol_version,
-                            info.node_info.try_count + 1,
-                            calculate_reliability(true, info.node_info.reliability_2h, info.age, 3600 * 2),
-                            calculate_reliability(true, info.node_info.reliability_8h, info.age, 3600 * 8),
-                            calculate_reliability(true, info.node_info.reliability_1d, info.age, 3600 * 24),
-                            calculate_reliability(true, info.node_info.reliability_1w, info.age, 3600 * 24 * 7),
-                            calculate_reliability(true, info.node_info.reliability_1m, info.age, 3600 * 24 * 30),
-                            info.node_info.addr.to_string(),
-                        ]
-                    ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr);
-                },
-                CrawledNode::NewNode(info) => {
-                    locked_db_conn.execute(
-                        "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)",
-                        params![&info.node_info.addr.to_string(), info.node_info.services.to_be_bytes()]
-                    ).unwrap();
-                    f_nin_flight.lock().unwrap().remove(&info.node_info.addr);
-                },
-            }
-            i += 1;
-        }
-    });
-
-    // Queue to send nodes to crawl to the crawler threads
-    let queue = ArrayQueue::new(threads * 2);
-    let arc_queue = Arc::new(queue);
-
-    // Work fetcher loop
+    // Crawler loop
     loop {
+        // Get nodes that were last tried more than 10 min ago, sorted oldest first
         let ten_min_ago = (time::SystemTime::now()
             .duration_since(time::SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -562,34 +445,143 @@ pub fn crawler_thread(
                 })
                 .collect();
         }
+
+        // Spawn a task to crawl each node, limited by the semaphore which uses the threads argument
         for node in nodes {
-            while arc_queue.is_full() {
-                thread::sleep(time::Duration::from_secs(1));
-            }
+            let net_status_c: NetStatus = net_status.clone();
+            let f_db_conn = db_conn.clone();
+            let permit = Arc::clone(&sem).acquire_owned().await;
 
-            {
-                let mut l_nodes_in_flight = nodes_in_flight.lock().unwrap();
-                if l_nodes_in_flight.get(&node.addr).is_some() {
-                    continue;
-                }
-                l_nodes_in_flight.insert(node.addr.clone());
-            }
+            // Crawler task
+            tokio::spawn(async move {
+                let _permit = permit;
+                let addrs = crawl_node(&node, net_status_c);
 
-            arc_queue.push(node).unwrap();
-
-            if pool.active_count() < pool.max_count() {
-                let net_status_c: NetStatus = net_status.clone();
-                let queue_c = arc_queue.clone();
-                let tx_c = tx.clone();
-                pool.execute(move || loop {
-                    while queue_c.is_empty() {
-                        thread::sleep(time::Duration::from_secs(1));
+                for crawled in addrs {
+                    let locked_db_conn = f_db_conn.lock().unwrap();
+                    locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
+                    match crawled {
+                        CrawledNode::Failed(info) => {
+                            locked_db_conn
+                                .execute(
+                                    "
+                                UPDATE nodes SET
+                                    last_tried = ?,
+                                    try_count = ?,
+                                    reliability_2h = ?,
+                                    reliability_8h = ?,
+                                    reliability_1d = ?,
+                                    reliability_1w = ?,
+                                    reliability_1m = ?
+                                WHERE address = ?",
+                                    params![
+                                        info.node_info.last_tried,
+                                        info.node_info.try_count + 1,
+                                        calculate_reliability(
+                                            false,
+                                            info.node_info.reliability_2h,
+                                            info.age,
+                                            3600 * 2
+                                        ),
+                                        calculate_reliability(
+                                            false,
+                                            info.node_info.reliability_8h,
+                                            info.age,
+                                            3600 * 8
+                                        ),
+                                        calculate_reliability(
+                                            false,
+                                            info.node_info.reliability_1d,
+                                            info.age,
+                                            3600 * 24
+                                        ),
+                                        calculate_reliability(
+                                            false,
+                                            info.node_info.reliability_1w,
+                                            info.age,
+                                            3600 * 24 * 7
+                                        ),
+                                        calculate_reliability(
+                                            false,
+                                            info.node_info.reliability_1m,
+                                            info.age,
+                                            3600 * 24 * 30
+                                        ),
+                                        info.node_info.addr.to_string(),
+                                    ],
+                                )
+                                .unwrap();
+                        }
+                        CrawledNode::UpdatedInfo(info) => {
+                            locked_db_conn
+                                .execute(
+                                    "UPDATE nodes SET
+                                    last_tried = ?,
+                                    last_seen = ?,
+                                    user_agent = ?,
+                                    services = ?,
+                                    starting_height = ?,
+                                    protocol_version = ?,
+                                    try_count = ?,
+                                    reliability_2h = ?,
+                                    reliability_8h = ?,
+                                    reliability_1d = ?,
+                                    reliability_1w = ?,
+                                    reliability_1m = ?
+                                WHERE address = ?",
+                                    params![
+                                        info.node_info.last_tried,
+                                        info.node_info.last_seen,
+                                        info.node_info.user_agent,
+                                        info.node_info.services.to_be_bytes(),
+                                        info.node_info.starting_height,
+                                        info.node_info.protocol_version,
+                                        info.node_info.try_count + 1,
+                                        calculate_reliability(
+                                            true,
+                                            info.node_info.reliability_2h,
+                                            info.age,
+                                            3600 * 2
+                                        ),
+                                        calculate_reliability(
+                                            true,
+                                            info.node_info.reliability_8h,
+                                            info.age,
+                                            3600 * 8
+                                        ),
+                                        calculate_reliability(
+                                            true,
+                                            info.node_info.reliability_1d,
+                                            info.age,
+                                            3600 * 24
+                                        ),
+                                        calculate_reliability(
+                                            true,
+                                            info.node_info.reliability_1w,
+                                            info.age,
+                                            3600 * 24 * 7
+                                        ),
+                                        calculate_reliability(
+                                            true,
+                                            info.node_info.reliability_1m,
+                                            info.age,
+                                            3600 * 24 * 30
+                                        ),
+                                        info.node_info.addr.to_string(),
+                                    ],
+                                )
+                                .unwrap();
+                        }
+                        CrawledNode::NewNode(info) => {
+                            locked_db_conn.execute(
+                                "INSERT OR IGNORE INTO nodes VALUES(?, 0, 0, '', ?, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)",
+                                params![&info.node_info.addr.to_string(), info.node_info.services.to_be_bytes()]
+                            ).unwrap();
+                        }
                     }
-                    let next_node = queue_c.pop().unwrap();
-                    crawl_node(tx_c.clone(), next_node, net_status_c.clone());
-                });
-            }
+                    locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
+                }
+            });
         }
-        thread::sleep(time::Duration::from_secs(1));
     }
 }

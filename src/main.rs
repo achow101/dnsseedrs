@@ -145,8 +145,8 @@ async fn main() {
     // Start crawler threads
     let db_conn_c = db_conn.clone();
     let net_status_c: NetStatus = net_status.clone();
-    let t_crawl = thread::spawn(move || {
-        crawler_thread(db_conn_c, args.threads - 3, net_status_c);
+    let t_crawl = tokio::spawn(async move {
+        crawler_thread(db_conn_c, args.threads - 3, net_status_c).await;
     });
 
     // Start dumper thread
