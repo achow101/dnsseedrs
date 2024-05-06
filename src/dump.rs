@@ -5,13 +5,13 @@ use std::{
     io::{BufReader, Read, Write},
     path::Path,
     sync::{Arc, Mutex},
-    thread, time,
 };
 
 use bitcoin::network::Network;
 use flate2::{write::GzEncoder, Compression};
+use tokio::time::{sleep, Duration};
 
-pub fn dumper_thread(
+pub async fn dumper_thread(
     db_conn: Arc<Mutex<rusqlite::Connection>>,
     dump_file: &String,
     chain: &Network,
@@ -19,7 +19,7 @@ pub fn dumper_thread(
     let mut count = 0;
     loop {
         // Sleep for 100s, then 200s, 400s, 800s, 1600s, and then 3200s forever
-        thread::sleep(time::Duration::from_secs(100 << count));
+        sleep(Duration::from_secs(100 << count)).await;
         if count < 5 {
             count += 1;
         }

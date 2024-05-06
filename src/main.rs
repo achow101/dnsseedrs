@@ -151,8 +151,8 @@ async fn main() {
 
     // Start dumper thread
     let db_conn_c2 = db_conn.clone();
-    let t_dump = thread::spawn(move || {
-        dumper_thread(db_conn_c2, &args.dump_file, &chain);
+    let t_dump = tokio::spawn(async move {
+        dumper_thread(db_conn_c2, &args.dump_file, &chain).await;
     });
 
     // Start DNS thread
