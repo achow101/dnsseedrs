@@ -150,6 +150,7 @@ fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
         ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+        println!("Failed: {}", &node.addr.to_string());
         return ret_addrs;
     }
     let sock = sock_res.unwrap();
@@ -331,6 +332,7 @@ fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
         ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+        println!("Failed: {}", &node.addr.to_string());
     }
 
     let _ = sock.shutdown(Shutdown::Both);
