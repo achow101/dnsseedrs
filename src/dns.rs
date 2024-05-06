@@ -3,7 +3,7 @@ use crate::dnssec::{parse_dns_keys_dir, DnsSigningKey, RecordsToSign};
 
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr},
     str::FromStr,
     sync::{Arc, Mutex, RwLock},
     time,
@@ -201,14 +201,12 @@ impl SeederInfo {
     }
 }
 
-async fn send_dns_failed(
-    sock: Arc<UdpSocket>,
+async fn build_dns_failed(
     req: &Message<[u8]>,
     code: Rcode,
-    from: &SocketAddr,
     query: &Option<Question<ParsedName<&[u8]>>>,
     seeder: Arc<SeederInfo>,
-) {
+) -> Result<Message<Vec<u8>>, String> {
     let res_builder = MessageBuilder::new_vec();
     match res_builder.start_answer(req, code) {
         Ok(res) => {
@@ -293,24 +291,20 @@ async fn send_dns_failed(
                 .unwrap();
             }
 
-            // Send
-            let _ = sock.send_to(addl.into_message().as_slice(), from).await;
+            Ok(addl.into_message())
         }
-        Err(e) => {
-            println!("Failed to send DNS no data: {}", e);
-        }
+        Err(e) => Err(format!("Failed to build DNS no data: {}", e)),
     }
 }
 
 async fn process_dns_request(
     buf: &[u8],
     req_len: usize,
-    from: SocketAddr,
-    sock: Arc<UdpSocket>,
     seeder: Arc<SeederInfo>,
     cache: Arc<RwLock<HashMap<ServiceFlags, CachedAddrs>>>,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
-) -> Result<(), String> {
+) -> Result<Vec<Message<Vec<u8>>>, String> {
+    let mut ret_msgs = Vec::<Message<Vec<u8>>>::new();
     let req = match Message::from_slice(&buf[..req_len]) {
         Ok(r) => r,
         Err(e) => {
@@ -324,16 +318,10 @@ async fn process_dns_request(
         return Err("Ignored non-query".to_string());
     }
     if req_header.tc() {
-        send_dns_failed(
-            sock.clone(),
-            req,
-            Rcode::SERVFAIL,
-            &from,
-            &None,
-            seeder.clone(),
-        )
-        .await;
-        return Err("Received truncated, unsupported".to_string());
+        if let Ok(msg) = build_dns_failed(req, Rcode::SERVFAIL, &None, seeder.clone()).await {
+            ret_msgs.push(msg)
+        }
+        return Ok(ret_msgs);
     }
 
     // Track records for signing
@@ -352,15 +340,10 @@ async fn process_dns_request(
         let question = match q_r {
             Ok(q) => q,
             Err(..) => {
-                send_dns_failed(
-                    sock.clone(),
-                    req,
-                    Rcode::FORMERR,
-                    &from,
-                    &None,
-                    seeder.clone(),
-                )
-                .await;
+                if let Ok(msg) = build_dns_failed(req, Rcode::FORMERR, &None, seeder.clone()).await
+                {
+                    ret_msgs.push(msg);
+                }
                 continue;
             }
         };
@@ -368,15 +351,11 @@ async fn process_dns_request(
 
         // Make sure we can serve this
         if !name.ends_with(&seeder.seed_domain) {
-            send_dns_failed(
-                sock.clone(),
-                req,
-                Rcode::REFUSED,
-                &from,
-                &Some(question),
-                seeder.clone(),
-            )
-            .await;
+            if let Ok(msg) =
+                build_dns_failed(req, Rcode::REFUSED, &Some(question), seeder.clone()).await
+            {
+                ret_msgs.push(msg);
+            }
             continue;
         }
 
@@ -384,29 +363,21 @@ async fn process_dns_request(
         let mut filter: ServiceFlags = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
         if name.label_count() != seeder.seed_domain.label_count() {
             if name.label_count() != seeder.seed_domain.label_count() + 1 {
-                send_dns_failed(
-                    sock.clone(),
-                    req,
-                    Rcode::NXDOMAIN,
-                    &from,
-                    &Some(question),
-                    seeder.clone(),
-                )
-                .await;
+                if let Ok(msg) =
+                    build_dns_failed(req, Rcode::NXDOMAIN, &Some(question), seeder.clone()).await
+                {
+                    ret_msgs.push(msg);
+                }
                 continue;
             }
             let filter_label = name.first().to_string();
             let this_filter = seeder.allowed_filters.get(&filter_label);
             if this_filter.is_none() {
-                send_dns_failed(
-                    sock.clone(),
-                    req,
-                    Rcode::NXDOMAIN,
-                    &from,
-                    &Some(question),
-                    seeder.clone(),
-                )
-                .await;
+                if let Ok(msg) =
+                    build_dns_failed(req, Rcode::NXDOMAIN, &Some(question), seeder.clone()).await
+                {
+                    ret_msgs.push(msg);
+                }
                 continue;
             }
             filter = *this_filter.unwrap();
@@ -416,15 +387,11 @@ async fn process_dns_request(
         match question.qclass() {
             Class::IN => (),
             _ => {
-                send_dns_failed(
-                    sock.clone(),
-                    req,
-                    Rcode::NOTIMP,
-                    &from,
-                    &Some(question),
-                    seeder.clone(),
-                )
-                .await;
+                if let Ok(msg) =
+                    build_dns_failed(req, Rcode::NOTIMP, &Some(question), seeder.clone()).await
+                {
+                    ret_msgs.push(msg);
+                }
                 continue;
             }
         };
@@ -472,15 +439,11 @@ async fn process_dns_request(
             Rtype::A => (),
             Rtype::AAAA => (),
             _ => {
-                send_dns_failed(
-                    sock.clone(),
-                    req,
-                    Rcode::NOERROR,
-                    &from,
-                    &Some(question),
-                    seeder.clone(),
-                )
-                .await;
+                if let Ok(msg) =
+                    build_dns_failed(req, Rcode::NOERROR, &Some(question), seeder.clone()).await
+                {
+                    ret_msgs.push(msg);
+                }
                 continue;
             }
         };
@@ -654,10 +617,8 @@ async fn process_dns_request(
         .unwrap();
     }
 
-    // Send response
-    let _ = sock.send_to(addl.into_message().as_slice(), from).await;
-
-    Ok(())
+    ret_msgs.push(addl.into_message());
+    Ok(ret_msgs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -697,19 +658,15 @@ pub async fn dns_thread(
         let cache_clone = cache.clone();
         let db_conn_clone = db_conn.clone();
         tokio::spawn(async move {
-            let ret = process_dns_request(
-                &buf,
-                req_len,
-                from,
-                sock_clone,
-                seeder_clone,
-                cache_clone,
-                db_conn_clone,
-            )
-            .await;
-
-            if let Err(e) = ret {
-                println!("{}", e);
+            match process_dns_request(&buf, req_len, seeder_clone, cache_clone, db_conn_clone).await
+            {
+                Ok(msgs) => {
+                    // Send each message individually
+                    for msg in msgs {
+                        let _ = sock_clone.send_to(msg.as_slice(), from).await;
+                    }
+                }
+                Err(e) => println!("{}", e),
             }
         });
     }
