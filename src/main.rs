@@ -171,11 +171,10 @@ async fn main() {
         .await;
     });
 
-    // Watchdog, exit if any main thread has died
-    loop {
-        if t_crawl.is_finished() || t_dump.is_finished() || t_dns.is_finished() {
-            break;
-        }
-        thread::sleep(time::Duration::from_secs(60));
-    }
+    // Select on task futures as a watchdog to exit if any main thread has died
+    tokio::select! {
+        r = t_crawl => r.unwrap(),
+        r = t_dump => r.unwrap(),
+        r = t_dns => r.unwrap(),
+    };
 }
