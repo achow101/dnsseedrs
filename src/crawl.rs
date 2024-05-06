@@ -172,23 +172,23 @@ async fn get_node_addrs(
 
         // Find the magic, always 4 bytes
         let mut msg = vec![0_u8; 4];
-        reader.read_exact(msg.as_mut_slice()).await.unwrap();
+        reader.read_exact(msg.as_mut_slice()).await?;
         while msg.as_slice() != <Magic as AsRef<[u8]>>::as_ref(&net_magic) {
             // Remove first byte
             msg.drain(0..1);
             let mut next_byte = [0_u8; 1];
-            reader.read_exact(&mut next_byte).await.unwrap();
+            reader.read_exact(&mut next_byte).await?;
             msg.extend(next_byte);
         }
 
         // Read command, always 12 bytes
         let mut cmd = [0_u8; 12];
-        reader.read_exact(&mut cmd).await.unwrap();
+        reader.read_exact(&mut cmd).await?;
         msg.extend(cmd);
 
         // Read data length
         let mut len_bytes = [0_u8; 4];
-        reader.read_exact(&mut len_bytes).await.unwrap();
+        reader.read_exact(&mut len_bytes).await?;
         let data_len = u32::from_le_bytes(len_bytes);
         msg.extend(len_bytes);
         if data_len as usize > MAX_MSG_SIZE {
@@ -197,12 +197,12 @@ async fn get_node_addrs(
 
         // Read the data
         let mut data: Vec<u8> = vec![0; data_len as usize];
-        reader.read_exact(data.as_mut_slice()).await.unwrap();
+        reader.read_exact(data.as_mut_slice()).await?;
         msg.extend(data);
 
         // Read the checksum, always 4 bytes
         let mut checksum = [0_u8; 4];
-        reader.read_exact(&mut checksum).await.unwrap();
+        reader.read_exact(&mut checksum).await?;
         msg.extend(checksum);
 
         // Now let rust-bitcoin do its decoding
@@ -318,47 +318,43 @@ async fn get_node_addrs(
     Ok(ret_addrs)
 }
 
-async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> {
-    let tried_timestamp = time::SystemTime::now()
-        .duration_since(time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let age = tried_timestamp - node.last_tried;
-    let mut ret_addrs = Vec::<CrawledNode>::new();
-
-    println!("Trying {}", &node.addr.to_string());
-
-    let sock_res = match node.addr.host {
-        Host::Ipv4(ip) if net_status.ipv4 => timeout(
-            time::Duration::from_secs(10),
-            TcpStream::connect(&SocketAddr::new(IpAddr::V4(ip), node.addr.port)),
-        )
-        .await
-        .unwrap(),
-        Host::Ipv6(ip) if net_status.ipv6 => timeout(
-            time::Duration::from_secs(10),
-            TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
-        )
-        .await
-        .unwrap(),
-        Host::CJDNS(ip) if net_status.cjdns => timeout(
-            time::Duration::from_secs(10),
-            TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
-        )
-        .await
-        .unwrap(),
+async fn connect_node(
+    node: &NodeInfo,
+    net_status: &NetStatus,
+) -> Result<TcpStream, std::io::Error> {
+    match node.addr.host {
+        Host::Ipv4(ip) if net_status.ipv4 => {
+            timeout(
+                time::Duration::from_secs(10),
+                TcpStream::connect(&SocketAddr::new(IpAddr::V4(ip), node.addr.port)),
+            )
+            .await?
+        }
+        Host::Ipv6(ip) if net_status.ipv6 => {
+            timeout(
+                time::Duration::from_secs(10),
+                TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
+            )
+            .await?
+        }
+        Host::CJDNS(ip) if net_status.cjdns => {
+            timeout(
+                time::Duration::from_secs(10),
+                TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
+            )
+            .await?
+        }
         Host::OnionV3(ref host) if net_status.onion_proxy.is_some() => {
             let proxy_addr = net_status.onion_proxy.as_ref().unwrap();
             let mut stream = timeout(
                 time::Duration::from_secs(10),
                 TcpStream::connect(&SocketAddr::from_str(proxy_addr).unwrap()),
             )
-            .await
-            .unwrap();
+            .await?;
             if stream.is_ok() {
                 let cr = socks5_connect(stream.as_mut().unwrap(), host, node.addr.port).await;
                 match cr {
-                    Ok(..) => stream,
+                    Ok(_) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
                 }
             } else {
@@ -371,12 +367,11 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
                 time::Duration::from_secs(10),
                 TcpStream::connect(&SocketAddr::from_str(proxy_addr).unwrap()),
             )
-            .await
-            .unwrap();
+            .await?;
             if stream.is_ok() {
                 let cr = socks5_connect(stream.as_mut().unwrap(), host, node.addr.port).await;
                 match cr {
-                    Ok(..) => stream,
+                    Ok(_) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
                 }
             } else {
@@ -384,15 +379,28 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
             }
         }
         _ => Err(std::io::Error::other("Net not available")),
-    };
-    if sock_res.is_err() {
+    }
+}
+
+async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> {
+    let tried_timestamp = time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let age = tried_timestamp - node.last_tried;
+    let mut ret_addrs = Vec::<CrawledNode>::new();
+
+    println!("Trying {}", &node.addr.to_string());
+
+    let conn_res = connect_node(node, &net_status).await;
+    if conn_res.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
         ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
         println!("Failed connect: {}", &node.addr.to_string());
         return ret_addrs;
     }
-    let mut sock = sock_res.unwrap();
+    let mut sock = conn_res.unwrap();
 
     println!("Connected to {}", &node.addr.to_string());
 
