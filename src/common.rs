@@ -246,3 +246,9 @@ pub struct NetStatus {
     pub onion_proxy: Option<String>,
     pub i2p_proxy: Option<String>,
 }
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub enum BindProtocol {
+    Udp,
+    Tcp,
+}

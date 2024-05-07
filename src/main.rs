@@ -4,10 +4,18 @@ mod dns;
 mod dnssec;
 mod dump;
 
-use crate::{common::NetStatus, crawl::crawler_thread, dns::dns_thread, dump::dumper_thread};
+use crate::{
+    common::{BindProtocol, NetStatus},
+    crawl::crawler_thread,
+    dns::dns_thread,
+    dump::dumper_thread,
+};
 
 use std::{
+    collections::HashSet,
+    net::SocketAddr,
     path::Path,
+    str::FromStr,
     sync::{Arc, Mutex},
     thread, time,
 };
@@ -46,11 +54,10 @@ struct Args {
     #[arg(short, long, default_value_t = 24)]
     threads: usize,
 
-    #[arg(short, long, default_value = "0.0.0.0")]
-    address: String,
-
-    #[arg(short, long, default_value_t = 53)]
-    port: u16,
+    /// protocol, IP, and port to bind to for servince DNS requests. Defaults are udp://0.0.0.0:53
+    /// and tcp://0.0.0.0:53. Specify multiple times for multiple binds
+    #[arg(short, long)]
+    bind: Vec<String>,
 
     #[arg(long, default_value = "main")]
     chain: String,
@@ -92,6 +99,39 @@ async fn main() {
         println!("{} is not a directory", args.dnssec_keys.unwrap());
         std::process::exit(1);
     }
+
+    // Parse the binds
+    let mut bindset = HashSet::<(BindProtocol, SocketAddr)>::new();
+    for bind in args.bind {
+        let proto: BindProtocol;
+        if bind.starts_with("udp://") {
+            proto = BindProtocol::Udp
+        } else if bind.starts_with("tcp://") {
+            proto = BindProtocol::Tcp
+        } else {
+            println!("{} is not a valid bind", bind);
+            std::process::exit(1);
+        }
+        let bind_addr = match SocketAddr::from_str(&bind[6..]) {
+            Ok(a) => a,
+            Err(_) => {
+                println!("{} is not a valid bind", bind);
+                std::process::exit(1);
+            }
+        };
+        bindset.insert((proto, bind_addr));
+    }
+    if bindset.is_empty() {
+        bindset.insert((
+            BindProtocol::Udp,
+            SocketAddr::from_str("0.0.0.0:53").unwrap(),
+        ));
+        bindset.insert((
+            BindProtocol::Tcp,
+            SocketAddr::from_str("0.0.0.0:53").unwrap(),
+        ));
+    }
+    let binds = bindset.iter().cloned().collect();
 
     let net_status = NetStatus {
         chain,
@@ -159,8 +199,7 @@ async fn main() {
     let db_conn_c3 = db_conn.clone();
     let t_dns = tokio::spawn(async move {
         dns_thread(
-            &args.address,
-            args.port,
+            binds,
             db_conn_c3,
             &args.seed_domain,
             &args.server_name,
