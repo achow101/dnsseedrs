@@ -600,7 +600,7 @@ async fn process_dns_request(
 
         if req.opt().is_some() && req.opt().unwrap().dnssec_ok() && !seeder.dnskeys.is_empty() {
             // Sign it
-            for rrsig in ans_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
+            for rrsig in auth_recs_sign.sign(&seeder.dnskeys, &seeder.seed_apex) {
                 let _ = auth.push(rrsig);
             }
         }
