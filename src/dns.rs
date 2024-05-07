@@ -733,7 +733,10 @@ pub async fn dns_thread(
                     Ok(msgs) => {
                         // Send each message individually
                         for msg in msgs {
-                            writer.write_u16(msg.as_octets().len() as u16).await.unwrap();
+                            writer
+                                .write_u16(msg.as_octets().len() as u16)
+                                .await
+                                .unwrap();
                             writer.write_all(msg.as_slice()).await.unwrap();
                         }
                         writer.flush().await.unwrap();
