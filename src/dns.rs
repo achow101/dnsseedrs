@@ -31,14 +31,13 @@ use rand::{seq::SliceRandom, thread_rng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::{TcpListener, UdpSocket},
-    time::timeout,
+    time::{interval, timeout},
 };
 
 #[derive(Clone)]
 struct CachedAddrs {
     ipv4: Vec<Ipv4Addr>,
     ipv6: Vec<Ipv6Addr>,
-    timestamp: time::Instant,
 }
 
 impl CachedAddrs {
@@ -46,7 +45,6 @@ impl CachedAddrs {
         CachedAddrs {
             ipv4: vec![],
             ipv6: vec![],
-            timestamp: time::Instant::now(),
         }
     }
 }
@@ -306,7 +304,6 @@ async fn process_dns_request(
     req_len: usize,
     seeder: Arc<SeederInfo>,
     cache: Arc<RwLock<HashMap<ServiceFlags, CachedAddrs>>>,
-    db_conn: Arc<Mutex<rusqlite::Connection>>,
 ) -> Result<Vec<Message<Vec<u8>>>, String> {
     let mut ret_msgs = Vec::<Message<Vec<u8>>>::new();
     let req = match Message::from_slice(&buf[..req_len]) {
@@ -453,120 +450,44 @@ async fn process_dns_request(
         };
 
         // Read from cache
-        let mut read_addrs: Option<CachedAddrs>;
+        let read_addrs_opt: Option<CachedAddrs>;
         {
             let cache_read = cache.read().unwrap();
-            read_addrs = cache_read.get(&filter).cloned();
+            read_addrs_opt = cache_read.get(&filter).cloned();
+        }
+        if read_addrs_opt.is_none() {
+            continue;
         }
 
-        // If cache for this filter was empty or expired, refresh it
-        if read_addrs.is_none()
-            || read_addrs
-                .as_ref()
-                .is_some_and(|c| c.timestamp.elapsed() > time::Duration::from_secs(60 * 10))
-        {
-            let locked_db_conn = db_conn.lock().unwrap();
-            let mut select_nodes = locked_db_conn
-                .prepare("SELECT * FROM nodes WHERE try_count > 0 ORDER BY RANDOM()")
-                .unwrap();
-            let node_iter = select_nodes
-                .query_map([], |r| {
-                    Ok(NodeInfo::construct(
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        u64::from_be_bytes(r.get(4)?),
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                        r.get(8)?,
-                        r.get(9)?,
-                        r.get(10)?,
-                        r.get(11)?,
-                        r.get(12)?,
-                    ))
-                })
-                .unwrap();
-            let nodes: Vec<NodeInfo> = node_iter
-                .filter_map(|n| match n {
-                    Ok(ni) => match ni {
-                        Ok(nni) => {
-                            if !is_good(&nni, &seeder.chain)
-                                || !ServiceFlags::from(nni.services).has(filter)
-                            {
-                                return None;
-                            }
-                            match nni.addr.host {
-                                Host::Ipv4(..) => Some(nni),
-                                Host::Ipv6(..) => Some(nni),
-                                _ => None,
-                            }
-                        }
-                        Err(e) => {
-                            println!("E4 {}", e);
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        println!("E5 {}", e);
-                        None
-                    }
-                })
-                .collect();
-            let mut new_cache = CachedAddrs::new();
-            for n in nodes {
-                match n.addr.host {
-                    Host::Ipv4(ip) => {
-                        new_cache.ipv4.push(ip);
-                    }
-                    Host::Ipv6(ip) => {
-                        new_cache.ipv6.push(ip);
-                    }
-                    _ => {
-                        continue;
-                    }
-                };
-            }
-            {
-                let mut cache_write = cache.write().unwrap();
-                cache_write.insert(filter, new_cache.clone());
-            }
-            let _ = read_addrs.insert(new_cache);
-        };
-        let mut addrs = read_addrs.unwrap();
+        let mut read_addrs = read_addrs_opt.unwrap();
 
-        // Shuffle addresses before returning them
+        // Shuffle addresses and truncate to 20 before returning them
         let mut rng = thread_rng();
-        addrs.ipv4.shuffle(&mut rng);
-        addrs.ipv6.shuffle(&mut rng);
+        read_addrs.ipv4.shuffle(&mut rng);
+        read_addrs.ipv4.truncate(20);
+        read_addrs.ipv6.shuffle(&mut rng);
+        read_addrs.ipv6.truncate(20);
 
         match question.qtype() {
             Rtype::A => {
-                for (i, node) in addrs.ipv4.iter().enumerate() {
-                    if i >= 20 {
-                        break;
-                    }
+                for node in read_addrs.ipv4 {
                     let rec = Record::new(
                         name.to_name::<Vec<u8>>(),
                         Class::IN,
                         Ttl::from_secs(60),
-                        A::new(*node),
+                        A::new(node),
                     );
                     res.push(rec.clone()).unwrap();
                     ans_recs_sign.add_a(rec);
                 }
             }
             Rtype::AAAA => {
-                for (i, node) in addrs.ipv6.iter().enumerate() {
-                    if i >= 20 {
-                        break;
-                    }
+                for node in read_addrs.ipv6 {
                     let rec = Record::new(
                         name.to_name::<Vec<u8>>(),
                         Class::IN,
                         Ttl::from_secs(60),
-                        Aaaa::new(*node),
+                        Aaaa::new(node),
                     );
                     res.push(rec.clone()).unwrap();
                     ans_recs_sign.add_aaaa(rec);
@@ -630,7 +551,6 @@ async fn dns_socket_task(
     bind: SocketAddr,
     seeder: Arc<SeederInfo>,
     cache: Arc<RwLock<HashMap<ServiceFlags, CachedAddrs>>>,
-    db_conn: Arc<Mutex<rusqlite::Connection>>,
 ) {
     if proto == BindProtocol::Udp {
         // Bind UDP socket
@@ -645,16 +565,9 @@ async fn dns_socket_task(
             let udp_sock_clone = udp_sock.clone();
             let seeder_clone = seeder.clone();
             let cache_clone = cache.clone();
-            let db_conn_clone = db_conn.clone();
             tokio::spawn(async move {
-                match process_dns_request(
-                    &buf,
-                    req_len,
-                    seeder_clone.clone(),
-                    cache_clone.clone(),
-                    db_conn_clone.clone(),
-                )
-                .await
+                match process_dns_request(&buf, req_len, seeder_clone.clone(), cache_clone.clone())
+                    .await
                 {
                     Ok(msgs) => {
                         // Send each message individually
@@ -677,7 +590,6 @@ async fn dns_socket_task(
 
             let seeder_clone = seeder.clone();
             let cache_clone = cache.clone();
-            let db_conn_clone = db_conn.clone();
             tokio::spawn(async move {
                 let (mut read_sock, mut write_sock) = tcp_stream.split();
                 let mut reader = BufReader::new(&mut read_sock);
@@ -702,7 +614,6 @@ async fn dns_socket_task(
                         req_len.into(),
                         seeder_clone.clone(),
                         cache_clone.clone(),
-                        db_conn_clone.clone(),
                     )
                     .await
                     {
@@ -722,6 +633,84 @@ async fn dns_socket_task(
                 }
             });
         }
+    }
+}
+
+async fn fill_cache(
+    cache: Arc<RwLock<HashMap<ServiceFlags, CachedAddrs>>>,
+    seeder: Arc<SeederInfo>,
+    db_conn: Arc<Mutex<rusqlite::Connection>>,
+) {
+    let mut interval = interval(time::Duration::from_secs(600));
+    loop {
+        // Do ever 10 minutes (first time will happen immediately)
+        interval.tick().await;
+
+        println!("Refilling cache");
+
+        // Fill the cache
+        let mut new_cache = HashMap::<ServiceFlags, CachedAddrs>::new();
+        for filter in seeder.allowed_filters.values() {
+            new_cache.insert(*filter, CachedAddrs::new());
+        }
+
+        // Get nodes from db
+        let locked_db_conn = db_conn.lock().unwrap();
+        let mut select_nodes = locked_db_conn
+            .prepare("SELECT * FROM nodes WHERE try_count > 0")
+            .unwrap();
+        let node_iter = select_nodes
+            .query_map([], |r| {
+                Ok(NodeInfo::construct(
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    u64::from_be_bytes(r.get(4)?),
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                ))
+            })
+            .unwrap();
+
+        for node_res in node_iter {
+            let node = node_res.unwrap().unwrap();
+            if !is_good(&node, &seeder.chain) {
+                continue;
+            }
+            for (filter, addrs) in &mut new_cache {
+                if ServiceFlags::from(node.services).has(*filter) {
+                    match node.addr.host {
+                        Host::Ipv4(ip) => addrs.ipv4.push(ip),
+                        Host::Ipv6(ip) => addrs.ipv6.push(ip),
+                        _ => continue,
+                    }
+                }
+            }
+        }
+
+        // Shuffle cached nodes and truncate to 100 nodes each
+        let mut rng = thread_rng();
+        for addrs in new_cache.values_mut() {
+            addrs.ipv4.shuffle(&mut rng);
+            addrs.ipv4.truncate(100);
+            addrs.ipv6.shuffle(&mut rng);
+            addrs.ipv6.truncate(100);
+        }
+
+        {
+            let mut cache_write = cache.write().unwrap();
+            for (filter, new_addrs) in new_cache {
+                cache_write.insert(filter, new_addrs);
+            }
+        }
+        println!("Cache Ready");
     }
 }
 
@@ -747,18 +736,24 @@ pub async fn dns_thread(
         *chain,
     ));
 
+    let cache_c = cache.clone();
+    let seeder_c = seeder.clone();
+    let db_conn_c = db_conn.clone();
+    tokio::spawn(async move {
+        fill_cache(cache_c, seeder_c, db_conn_c).await;
+    });
+
     while binds.len() > 1 {
         // Start a task for each socket
         let (proto, bind) = binds.pop().unwrap();
         let seeder_clone = seeder.clone();
         let cache_clone = cache.clone();
-        let db_conn_clone = db_conn.clone();
         tokio::spawn(async move {
-            dns_socket_task(proto, bind, seeder_clone, cache_clone, db_conn_clone).await;
+            dns_socket_task(proto, bind, seeder_clone, cache_clone).await;
         });
     }
 
     // Use this task for the last bind
     let (proto, bind) = binds.pop().unwrap();
-    dns_socket_task(proto, bind, seeder, cache, db_conn).await;
+    dns_socket_task(proto, bind, seeder, cache).await;
 }
