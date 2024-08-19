@@ -188,6 +188,7 @@ fn default_port(chain: &Network) -> u16 {
     match chain {
         Network::Bitcoin => 8333,
         Network::Testnet(TestnetVersion::V3) => 18333,
+        Network::Testnet(TestnetVersion::V4) => 48333,
         Network::Signet => 38333,
         Network::Regtest => 18444,
         &_ => 0,
@@ -198,6 +199,7 @@ fn min_blocks(chain: &Network) -> i32 {
     match chain {
         Network::Bitcoin => 800000,
         Network::Testnet(TestnetVersion::V3) => 2500000,
+        Network::Testnet(TestnetVersion::V4) => 30000,
         _ => 1,
     }
 }
