@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 base32ct = { version = "0.2.0", features = ["alloc"] }
 base64ct = { version = "1.6.0", features = ["alloc"] }
-bitcoin = "0.32.0"
+bitcoin = "0.33.99"
 clap = { version = "4.5.1", features = ["derive"] }
 domain = { version = "0.10.1", features = ["sign"] }
 flate2 = "1.0.28"
@@ -18,3 +18,12 @@ rusqlite = "0.31.0"
 sha3 = "0.10.8"
 tar = "0.4.40"
 tokio = { version = "1.37.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[patch.crates-io]
+bitcoin = { git = "https://github.com/achow101/rust-bitcoin.git", branch = "testnet4" }
+base58ck = { git = "https://github.com/achow101/rust-bitcoin.git", branch = "testnet4" }
+bitcoin-primitives = { git = "https://github.com/achow101/rust-bitcoin.git", branch = "testnet4" }
+bitcoin_hashes = { git = "https://github.com/achow101/rust-bitcoin.git", branch = "testnet4" }
+bitcoin-internals = { git = "https://github.com/achow101/rust-bitcoin.git", branch = "testnet4" }
+bitcoin-io = { git = "https://github.com/achow101/rust-bitcoin.git", branch = "testnet4" }
+bitcoin-units = { git = "https://github.com/achow101/rust-bitcoin.git", branch = "testnet4" }
