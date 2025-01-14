@@ -16,14 +16,13 @@ Options:
   -s, --seednode <SEEDNODE>        
       --db-file <DB_FILE>          [default: sqlite.db]
       --dump-file <DUMP_FILE>      [default: seeds.txt]
-      --ipv4-reachable             
-      --ipv6-reachable             
+      --no-ipv4                    
+      --no-ipv6                    
   -c, --cjdns-reachable            
   -o, --onion-proxy <ONION_PROXY>  [default: 127.0.0.1:9050]
   -i, --i2p-proxy <I2P_PROXY>      [default: 127.0.0.1:4447]
   -t, --threads <THREADS>          [default: 24]
-  -a, --address <ADDRESS>          [default: 0.0.0.0]
-  -p, --port <PORT>                [default: 53]
+  -b, --bind <BIND>                protocol, IP, and port to bind to for servince DNS requests. Defaults are udp://0.0.0.0:53 and tcp://0.0.0.0:53. Specify multiple times for multiple binds
       --chain <CHAIN>              [default: main]
       --dnssec-keys <DNSSEC_KEYS>  The path to a directory containing DNSSEC keys produced by dnssec-keygen
   -h, --help                       Print help
