@@ -194,9 +194,10 @@ fn default_port(chain: &Network) -> u16 {
 
 fn min_blocks(chain: &Network) -> i32 {
     match chain {
-        Network::Bitcoin => 800000,
-        Network::Testnet => 2500000,
-        Network::Testnet4 => 30000,
+        Network::Bitcoin => 880000,
+        Network::Testnet => 3600000,
+        Network::Testnet4 => 65000,
+        Network::Signet => 230000,
         _ => 1,
     }
 }
