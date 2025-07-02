@@ -86,7 +86,10 @@ async fn main() {
     // Pick the network
     let chain_p = Network::from_core_arg(&args.chain);
     match chain_p {
-        Ok(Network::Bitcoin) | Ok(Network::Testnet) | Ok(Network::Testnet4) | Ok(Network::Signet) => (),
+        Ok(Network::Bitcoin)
+        | Ok(Network::Testnet)
+        | Ok(Network::Testnet4)
+        | Ok(Network::Signet) => (),
         _ => {
             println!("Unsupported network type: {}", args.chain);
             std::process::exit(1);
@@ -109,13 +112,13 @@ async fn main() {
         } else if bind.starts_with("tcp://") {
             proto = BindProtocol::Tcp
         } else {
-            println!("{} is not a valid bind", bind);
+            println!("{bind} is not a valid bind");
             std::process::exit(1);
         }
         let bind_addr = match SocketAddr::from_str(&bind[6..]) {
             Ok(a) => a,
             Err(_) => {
-                println!("{} is not a valid bind", bind);
+                println!("{bind} is not a valid bind");
                 std::process::exit(1);
             }
         };

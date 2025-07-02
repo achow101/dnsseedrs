@@ -295,7 +295,7 @@ async fn build_dns_failed(
 
             Ok(addl.into_message())
         }
-        Err(e) => Err(format!("Failed to build DNS no data: {}", e)),
+        Err(e) => Err(format!("Failed to build DNS no data: {e}")),
     }
 }
 
@@ -309,7 +309,7 @@ async fn process_dns_request(
     let req = match Message::from_slice(&buf[..req_len]) {
         Ok(r) => r,
         Err(e) => {
-            return Err(format!("E1 {}", e));
+            return Err(format!("E1 {e}"));
         }
     };
 
@@ -334,7 +334,7 @@ async fn process_dns_request(
     let mut res = match res_builder.start_answer(req, Rcode::NOERROR) {
         Ok(r) => r,
         Err(e) => {
-            return Err(format!("E3 {}", e));
+            return Err(format!("E3 {e}"));
         }
     };
     for q_r in req.question() {
@@ -575,7 +575,7 @@ async fn dns_socket_task(
                             let _ = udp_sock_clone.send_to(msg.as_slice(), from).await;
                         }
                     }
-                    Err(e) => println!("{}", e),
+                    Err(e) => println!("{e}"),
                 }
             });
         }
@@ -628,7 +628,7 @@ async fn dns_socket_task(
                             }
                             writer.flush().await.unwrap();
                         }
-                        Err(e) => println!("{}", e),
+                        Err(e) => println!("{e}"),
                     }
                 }
             });

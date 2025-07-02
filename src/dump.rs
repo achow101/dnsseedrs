@@ -54,19 +54,19 @@ pub async fn dumper_thread(
                     Ok(ni) => match ni {
                         Ok(nni) => Some(nni),
                         Err(e) => {
-                            println!("{}", e);
+                            println!("{e}");
                             None
                         }
                     },
                     Err(e) => {
-                        println!("{}", e);
+                        println!("{e}");
                         None
                     }
                 })
                 .collect();
         }
 
-        let txt_tmp_path = format!("{}.tmp", dump_file);
+        let txt_tmp_path = format!("{dump_file}.tmp");
         let mut txt_tmp_file = File::create(&txt_tmp_path).unwrap();
         println!("Writing txt to temporary file {}", &txt_tmp_path);
         writeln!(
@@ -102,12 +102,12 @@ pub async fn dumper_thread(
                 node.user_agent,
             ).unwrap();
         }
-        println!("Renaming {} to {}", txt_tmp_path, dump_file);
+        println!("Renaming {txt_tmp_path} to {dump_file}");
         rename(txt_tmp_path.clone(), dump_file).unwrap();
 
         // Compress with gz
-        let gz_tmp_path = format!("{}.gz.tmp", dump_file);
-        println!("Writing gz to temporary file {}", gz_tmp_path);
+        let gz_tmp_path = format!("{dump_file}.gz.tmp");
+        println!("Writing gz to temporary file {gz_tmp_path}");
         let gz_tmp_file = File::create(&gz_tmp_path).unwrap();
         let mut enc = GzEncoder::new(gz_tmp_file, Compression::default());
         let f = File::open(dump_file).unwrap();
@@ -118,14 +118,14 @@ pub async fn dumper_thread(
             match reader.read(&mut buffer) {
                 Ok(0) => break, // EOF
                 Ok(count) => enc.write_all(&buffer[..count]).unwrap(),
-                Err(e) => panic!("Failed to read from file: {}", e),
+                Err(e) => panic!("Failed to read from file: {e}"),
             }
         }
         enc.finish().unwrap();
 
-        let gz_path = format!("{}.gz", dump_file);
+        let gz_path = format!("{dump_file}.gz");
         let archive_path = Path::new(&gz_path);
-        println!("Renaming {} to {:?}", gz_tmp_path, archive_path);
+        println!("Renaming {gz_tmp_path} to {archive_path:?}");
         rename(gz_tmp_path, archive_path).unwrap();
     }
 }

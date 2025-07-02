@@ -300,7 +300,7 @@ async fn get_node_addrs(
                                 }));
                             }
                         }
-                        Err(e) => println!("Error: {}", e),
+                        Err(e) => println!("Error: {e}"),
                     }
                 }
                 break;
@@ -390,7 +390,11 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
     let age = tried_timestamp - node.last_tried;
     let mut ret_addrs = Vec::<CrawledNode>::new();
 
-    println!("Trying {}, current try = {}", &node.addr.to_string(), node.try_count + 1);
+    println!(
+        "Trying {}, current try = {}",
+        &node.addr.to_string(),
+        node.try_count + 1
+    );
 
     let conn_res = connect_node(node, &net_status).await;
     if conn_res.is_err() {
@@ -422,7 +426,7 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
 }
 
 fn calculate_reliability(good: bool, old_reliability: f64, age: u64, window: u64) -> f64 {
-    let alpha = 1.0 - (-1.0 * age as f64 / window as f64).exp(); // 1 - e^(-delta T / tau)
+    let alpha = 1.0 - (-(age as f64) / window as f64).exp(); // 1 - e^(-delta T / tau)
     let x = if good { 1.0 } else { 0.0 };
     (alpha * x) + ((1.0 - alpha) * old_reliability) // alpha * x + (1 - alpha) * s_{t-1}
 }
@@ -538,10 +542,7 @@ pub async fn crawler_thread(
                 .unwrap();
             nodes = node_iter
                 .filter_map(|n| match n {
-                    Ok(ni) => match ni {
-                        Ok(nni) => Some(nni),
-                        Err(..) => None,
-                    },
+                    Ok(ni) => ni.ok(),
                     Err(..) => None,
                 })
                 .collect();

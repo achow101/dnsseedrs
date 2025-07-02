@@ -102,7 +102,7 @@ pub fn parse_dns_keys_dir(
     // dnskeys map: (flags, algo) -> keypair
     let mut dnskeys = HashMap::<(u16, SecAlg), DnsSigningKey>::new();
     if dnskeys_dir.is_some() {
-        let fname_prefix = format!("K{}", name);
+        let fname_prefix = format!("K{name}");
         for entry in read_dir(Path::new(&dnskeys_dir.unwrap())).unwrap() {
             let fname = entry.as_ref().unwrap().file_name().into_string().unwrap();
             if !fname.starts_with(&fname_prefix) || !fname.ends_with(".key") {
@@ -120,7 +120,7 @@ pub fn parse_dns_keys_dir(
             let pubkey_reader = BufReader::new(pubkey_file);
             let pubkey_line = pubkey_reader.lines().last().unwrap().unwrap();
             let pubkey_line_split: Vec<&str> = pubkey_line.splitn(7, ' ').collect();
-            if !pubkey_line_split[0].eq(&format!("{}.", name))
+            if !pubkey_line_split[0].eq(&format!("{name}."))
                 || !pubkey_line_split[1].eq("IN")
                 || !pubkey_line_split[2].eq("DNSKEY")
             {
