@@ -390,7 +390,7 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
     let age = tried_timestamp - node.last_tried;
     let mut ret_addrs = Vec::<CrawledNode>::new();
 
-    println!("Trying {}", &node.addr.to_string());
+    println!("Trying {}, current try = {}", &node.addr.to_string(), node.try_count + 1);
 
     let conn_res = connect_node(node, &net_status).await;
     if conn_res.is_err() {
