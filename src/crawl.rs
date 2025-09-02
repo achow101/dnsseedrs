@@ -553,6 +553,10 @@ pub async fn crawler_thread(
             {
                 let mut in_flight = nodes_in_flight.lock().unwrap();
                 if in_flight.get(&node.addr).is_some() {
+                    println!(
+                        "Crawl spawner: {} is already in flight",
+                        &node.addr.to_string()
+                    );
                     continue;
                 }
                 in_flight.insert(node.addr.clone());
@@ -561,7 +565,17 @@ pub async fn crawler_thread(
             let f_in_flight = nodes_in_flight.clone();
             let net_status_c: NetStatus = net_status.clone();
             let f_db_conn = db_conn.clone();
-            let permit = Arc::clone(&sem).acquire_owned().await;
+            let sem_clone = Arc::clone(&sem);
+            println!(
+                "Crawl spawner - {}: waiting for semaphore, {} permits available",
+                &node.addr.to_string(),
+                sem_clone.available_permits()
+            );
+            let permit = sem_clone.acquire_owned().await;
+            println!(
+                "Crawl spawner - {}: acquired semaphore",
+                &node.addr.to_string()
+            );
 
             // Crawler task
             tokio::spawn(async move {
