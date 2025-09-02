@@ -582,9 +582,9 @@ pub async fn crawler_thread(
                 let _permit = permit;
                 let addrs = crawl_node(&node, net_status_c).await;
 
+                let locked_db_conn = f_db_conn.lock().unwrap();
+                locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
                 for crawled in addrs {
-                    let locked_db_conn = f_db_conn.lock().unwrap();
-                    locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
                     match crawled {
                         CrawledNode::Failed(info) => {
                             locked_db_conn
@@ -704,8 +704,8 @@ pub async fn crawler_thread(
                             ).unwrap();
                         }
                     }
-                    locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
                 }
+                locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
 
                 {
                     f_in_flight.lock().unwrap().remove(&node.addr);
