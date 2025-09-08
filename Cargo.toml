@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 base32ct = { version = "0.2.0", features = ["alloc"] }
 base64ct = { version = "~1.6.0", features = ["alloc"] }
+bip324 = { version = "0.10.0", features = ["tokio"] }
 bitcoin = "0.32.6"
 clap = { version = "4.5.1", features = ["derive"] }
 domain = { version = "0.10.1", features = ["sign"] }
