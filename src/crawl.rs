@@ -164,7 +164,7 @@ async fn get_node_addrs_v1(
         receiver: addr_them,
         sender: addr_me,
         nonce: 0,
-        user_agent: "/crawlrs:0.1.0/".to_string(),
+        user_agent: "/crawlrs:0.2.0/".to_string(),
         start_height: -1,
         relay: false,
     };
@@ -380,7 +380,7 @@ async fn get_node_addrs_v2(
         receiver: addr_them,
         sender: addr_me,
         nonce: 0,
-        user_agent: "/crawlrs:0.1.0/".to_string(),
+        user_agent: "/crawlrs:0.2.0/".to_string(),
         start_height: -1,
         relay: false,
     };
