@@ -2,6 +2,7 @@ use crate::common::{Host, NetStatus, NodeAddress, NodeInfo};
 
 use std::{
     collections::HashSet,
+    error::Error,
     io::BufReader as StdBufReader,
     net::{IpAddr, SocketAddr},
     str::FromStr,
@@ -10,6 +11,13 @@ use std::{
 };
 
 use base32ct::{Base32Unpadded, Encoding};
+use bip324::futures::Protocol as V2Protocol;
+use bip324::io::Payload;
+use bip324::serde::{
+    serialize as V2Serialize,
+    deserialize as V2Deserialize,
+    NetworkMessage as V2NetworkMessage,
+};
 use bitcoin::{
     consensus::{Decodable, Encodable},
     p2p::{
@@ -38,6 +46,15 @@ enum CrawledNode {
     UpdatedInfo(CrawlInfo),
     NewNode(CrawlInfo),
 }
+
+#[derive(Debug)]
+struct V2ConnectError {}
+impl std::fmt::Display for V2ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Faled to connect to peer with P2Pv2")
+    }
+}
+impl Error for V2ConnectError {}
 
 async fn socks5_connect(
     sock: &mut TcpStream,
@@ -98,7 +115,7 @@ async fn socks5_connect(
     Ok(())
 }
 
-async fn get_node_addrs(
+async fn get_node_addrs_v1(
     sock: &mut TcpStream,
     node: &NodeInfo,
     net_status: &NetStatus,
@@ -317,6 +334,188 @@ async fn get_node_addrs(
     }
     Ok(ret_addrs)
 }
+async fn get_node_addrs_v2(
+    sock: &mut TcpStream,
+    node: &NodeInfo,
+    net_status: &NetStatus,
+    tried_timestamp: u64,
+    age: u64,
+) -> Result<Vec<CrawledNode>, Box<dyn Error + Send>> {
+    let mut ret_addrs = Vec::<CrawledNode>::new();
+    let mut write_buf = Vec::<u8>::new();
+
+    // Prep Version message
+    let addr_them = match &node.addr.host {
+        Host::Ipv4(ip) => Address {
+            services: ServiceFlags::NONE,
+            address: ip.to_ipv6_mapped().segments(),
+            port: node.addr.port,
+        },
+        Host::Ipv6(ip) => Address {
+            services: ServiceFlags::NONE,
+            address: ip.segments(),
+            port: node.addr.port,
+        },
+        Host::OnionV3(..) | Host::I2P(..) | Host::CJDNS(..) => Address {
+            services: ServiceFlags::NONE,
+            address: [0, 0, 0, 0, 0, 0, 0, 0],
+            port: node.addr.port,
+        },
+    };
+    let addr_me = Address {
+        services: ServiceFlags::NONE,
+        address: [0, 0, 0, 0, 0, 0, 0, 0],
+        port: 0,
+    };
+    let ver_msg = VersionMessage {
+        version: 70016,
+        services: ServiceFlags::NONE,
+        timestamp: i64::try_from(
+            time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap(),
+        receiver: addr_them,
+        sender: addr_me,
+        nonce: 0,
+        user_agent: "/crawlrs:0.1.0/".to_string(),
+        start_height: -1,
+        relay: false,
+    };
+
+    let (read_sock, write_sock) = sock.split();
+    let reader = AsyncBufReader::new(read_sock);
+    let mut protocol = match V2Protocol::new(
+        net_status.chain,
+        bip324::Role::Initiator,
+        None, None, // no garbage or decoys
+        reader,
+        write_sock,
+    ).await {
+        Ok(p) => p,
+        Err(..) => {
+            return Err(Box::new(V2ConnectError {}));
+        },
+    };
+
+    // Send version and sendaddrv2 messages
+    protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::Version(ver_msg)))).await.unwrap();
+    protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::SendAddrV2 {}))).await.unwrap();
+    write_buf.clear();
+
+    // Receive loop
+    loop {
+        let response = match protocol.read().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(Box::new(std::io::Error::other(e.to_string())));
+            }
+        };
+        let msg = match V2Deserialize(&response.contents()) {
+            Ok(m) => m,
+            Err(e) => {
+                return Err(Box::new(std::io::Error::other(e.to_string())));
+            }
+        };
+        match msg {
+            NetworkMessage::Version(ver) => {
+                // Send verack and getaddr
+                protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::Verack {}))).await.unwrap();
+                protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::GetAddr {}))).await.unwrap();
+
+                let mut new_info = node.clone();
+                new_info.last_tried = tried_timestamp;
+                new_info.last_seen = time::SystemTime::now()
+                    .duration_since(time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                new_info.user_agent.clone_from(&ver.user_agent);
+                new_info.services = ver.services.to_u64();
+                new_info.starting_height = ver.start_height;
+                new_info.protocol_version = ver.version;
+                ret_addrs.push(CrawledNode::UpdatedInfo(CrawlInfo {
+                    node_info: new_info,
+                    age,
+                }));
+            }
+            NetworkMessage::Addr(addrs) => {
+                println!("Received addrv1 from {}", &node.addr.to_string());
+                for (_, a) in addrs {
+                    if let Ok(s) = a.socket_addr() {
+                        if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
+                            new_info.services = a.services.to_u64();
+                            ret_addrs.push(CrawledNode::NewNode(CrawlInfo {
+                                node_info: new_info,
+                                age: 0,
+                            }));
+                        }
+                    };
+                }
+                break;
+            }
+            NetworkMessage::AddrV2(addrs) => {
+                println!("Received addrv2 from {}", &node.addr.to_string());
+                for a in addrs {
+                    let addrstr = match a.addr {
+                        AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => match a.socket_addr() {
+                            Ok(s) => Ok(s.to_string()),
+                            Err(..) => Err("IP type address couldn't be turned into SocketAddr"),
+                        },
+                        AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip, &a.port.to_string())),
+                        AddrV2::TorV2(..) => Err("who's advertising torv2????"),
+                        AddrV2::TorV3(host) => {
+                            let mut to_hash: Vec<u8> = vec![];
+                            to_hash.extend_from_slice(b".onion checksum");
+                            to_hash.extend_from_slice(&host);
+                            to_hash.push(0x03);
+                            let checksum = Sha3_256::new().chain_update(to_hash).finalize();
+
+                            let mut to_enc: Vec<u8> = vec![];
+                            to_enc.extend_from_slice(&host);
+                            to_enc.extend_from_slice(&checksum[0..2]);
+                            to_enc.push(0x03);
+
+                            Ok(format!(
+                                "{}.onion:{}",
+                                Base32Unpadded::encode_string(&to_enc).trim_matches(char::from(0)),
+                                &a.port.to_string()
+                            )
+                            .to_string())
+                        }
+                        AddrV2::I2p(host) => Ok(format!(
+                            "{}.b32.i2p:{}",
+                            Base32Unpadded::encode_string(&host),
+                            &a.port.to_string()
+                        )
+                        .to_string()),
+                        _ => Err("unknown"),
+                    };
+                    match addrstr {
+                        Ok(s) => {
+                            if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
+                                new_info.services = a.services.to_u64();
+                                ret_addrs.push(CrawledNode::NewNode(CrawlInfo {
+                                    node_info: new_info,
+                                    age: 0,
+                                }));
+                            }
+                        }
+                        Err(e) => println!("Error: {e}"),
+                    }
+                }
+                break;
+            }
+            NetworkMessage::Ping(ping) => {
+                protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::Pong(ping)))).await.unwrap();
+            }
+            _ => (),
+        };
+        write_buf.clear();
+    }
+    Ok(ret_addrs)
+}
 
 async fn connect_node(
     node: &NodeInfo,
@@ -396,32 +595,57 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
         node.try_count + 1
     );
 
-    let conn_res = connect_node(node, &net_status).await;
-    if conn_res.is_err() {
+    let v2_conn_res = connect_node(node, &net_status).await;
+    if v2_conn_res.is_err() {
         let mut node_info = node.clone();
         node_info.last_tried = tried_timestamp;
         ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
         println!("Failed connect: {}", &node.addr.to_string());
         return ret_addrs;
     }
-    let mut sock = conn_res.unwrap();
+    let mut v2_sock = v2_conn_res.unwrap();
 
-    println!("Connected to {}", &node.addr.to_string());
+    println!("Connected to {} for v2 crawl", &node.addr.to_string());
 
-    let ret = get_node_addrs(&mut sock, node, &net_status, tried_timestamp, age).await;
-
+    let ret = get_node_addrs_v2(&mut v2_sock, node, &net_status, tried_timestamp, age).await;
     match ret {
         Ok(r) => ret_addrs.extend(r),
         Err(e) => {
-            let mut node_info = node.clone();
-            node_info.last_tried = tried_timestamp;
-            ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
-            println!("Failed crawl: {}, {}", &node.addr.to_string(), e);
+            if e.is::<V2ConnectError>() {
+                let v1_conn_res = connect_node(node, &net_status).await;
+                if v1_conn_res.is_err() {
+                    let mut node_info = node.clone();
+                    node_info.last_tried = tried_timestamp;
+                    ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+                    println!("Failed connect: {}", &node.addr.to_string());
+                    return ret_addrs;
+                }
+                let mut v1_sock = v1_conn_res.unwrap();
+
+                println!("Connected to {} for v1 crawl", &node.addr.to_string());
+
+                let ret = get_node_addrs_v1(&mut v1_sock, node, &net_status, tried_timestamp, age).await;
+                match ret {
+                    Ok(r) => ret_addrs.extend(r),
+                    Err(e) => {
+                        let mut node_info = node.clone();
+                        node_info.last_tried = tried_timestamp;
+                        ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+                        println!("Failed crawl: {}, {}", &node.addr.to_string(), e);
+                    }
+                }
+                v1_sock.shutdown().await.unwrap();
+            } else {
+                let mut node_info = node.clone();
+                node_info.last_tried = tried_timestamp;
+                ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+                println!("Failed crawl: {}, {}", &node.addr.to_string(), e);
+            }
         }
     }
 
     println!("Done {}", &node.addr.to_string());
-    sock.shutdown().await.unwrap();
+    v2_sock.shutdown().await.unwrap();
     ret_addrs
 }
 
