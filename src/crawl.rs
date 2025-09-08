@@ -424,7 +424,7 @@ async fn get_node_addrs_v2(
                 return Err(Box::new(std::io::Error::other(e.to_string())));
             }
         };
-        let msg = match V2Deserialize(&response.contents()) {
+        let msg = match V2Deserialize(response.contents()) {
             Ok(m) => m,
             Err(e) => {
                 return Err(Box::new(std::io::Error::other(e.to_string())));
@@ -570,8 +570,8 @@ async fn connect_node(
                 TcpStream::connect(&SocketAddr::from_str(proxy_addr).unwrap()),
             )
             .await?;
-            if stream.is_ok() {
-                let cr = socks5_connect(stream.as_mut().unwrap(), host, node.addr.port).await;
+            if let Ok(mut_stream) = &mut stream {
+                let cr = socks5_connect(mut_stream, host, node.addr.port).await;
                 match cr {
                     Ok(_) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
@@ -587,8 +587,8 @@ async fn connect_node(
                 TcpStream::connect(&SocketAddr::from_str(proxy_addr).unwrap()),
             )
             .await?;
-            if stream.is_ok() {
-                let cr = socks5_connect(stream.as_mut().unwrap(), host, node.addr.port).await;
+            if let Ok(mut_stream) = &mut stream {
+                let cr = socks5_connect(mut_stream, host, node.addr.port).await;
                 match cr {
                     Ok(_) => stream,
                     Err(e) => Err(std::io::Error::other(e)),
@@ -692,9 +692,9 @@ pub async fn crawler_thread(
         )
         .await
         .unwrap();
-        if onion_proxy_check.is_ok() {
+        if let Ok(onion_proxy_sock) = &mut onion_proxy_check {
             if socks5_connect(
-                onion_proxy_check.as_mut().unwrap(),
+                onion_proxy_sock,
                 &"duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion".to_string(),
                 80,
             )
@@ -723,9 +723,9 @@ pub async fn crawler_thread(
         )
         .await
         .unwrap();
-        if i2p_proxy_check.is_ok() {
+        if let Ok(i2p_proxy_sock) = &mut i2p_proxy_check {
             if socks5_connect(
-                i2p_proxy_check.as_mut().unwrap(),
+                i2p_proxy_sock,
                 &"gqt2klvr6r2hpdfxzt4bn2awwehsnc7l5w22fj3enbauxkhnzcoq.b32.i2p".to_string(),
                 80,
             )

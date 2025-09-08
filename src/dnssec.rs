@@ -101,9 +101,9 @@ pub fn parse_dns_keys_dir(
 ) -> HashMap<(u16, SecAlg), DnsSigningKey> {
     // dnskeys map: (flags, algo) -> keypair
     let mut dnskeys = HashMap::<(u16, SecAlg), DnsSigningKey>::new();
-    if dnskeys_dir.is_some() {
+    if let Some(dnskeys_dir_path) = dnskeys_dir {
         let fname_prefix = format!("K{name}");
-        for entry in read_dir(Path::new(&dnskeys_dir.unwrap())).unwrap() {
+        for entry in read_dir(Path::new(&dnskeys_dir_path)).unwrap() {
             let fname = entry.as_ref().unwrap().file_name().into_string().unwrap();
             if !fname.starts_with(&fname_prefix) || !fname.ends_with(".key") {
                 continue;

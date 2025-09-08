@@ -106,8 +106,7 @@ impl NodeInfo {
 
 fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
     let addr_parse_res = SocketAddr::from_str(addr);
-    if addr_parse_res.is_ok() {
-        let parsed_addr = addr_parse_res.unwrap();
+    if let Ok(parsed_addr) = addr_parse_res {
         let ip = parsed_addr.ip().to_canonical();
         if let IpAddr::V4(ip4) = ip {
             // Similar to is_global(), but not unstable only feature
