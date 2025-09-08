@@ -14,9 +14,7 @@ use base32ct::{Base32Unpadded, Encoding};
 use bip324::futures::Protocol as V2Protocol;
 use bip324::io::Payload;
 use bip324::serde::{
-    serialize as V2Serialize,
-    deserialize as V2Deserialize,
-    NetworkMessage as V2NetworkMessage,
+    deserialize as V2Deserialize, serialize as V2Serialize, NetworkMessage as V2NetworkMessage,
 };
 use bitcoin::{
     consensus::{Decodable, Encodable},
@@ -390,19 +388,32 @@ async fn get_node_addrs_v2(
     let mut protocol = match V2Protocol::new(
         net_status.chain,
         bip324::Role::Initiator,
-        None, None, // no garbage or decoys
+        None,
+        None, // no garbage or decoys
         reader,
         write_sock,
-    ).await {
+    )
+    .await
+    {
         Ok(p) => p,
         Err(..) => {
             return Err(Box::new(V2ConnectError {}));
-        },
+        }
     };
 
     // Send version and sendaddrv2 messages
-    protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::Version(ver_msg)))).await.unwrap();
-    protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::SendAddrV2 {}))).await.unwrap();
+    protocol
+        .write(&Payload::genuine(V2Serialize(V2NetworkMessage::Version(
+            ver_msg,
+        ))))
+        .await
+        .unwrap();
+    protocol
+        .write(&Payload::genuine(V2Serialize(
+            V2NetworkMessage::SendAddrV2 {},
+        )))
+        .await
+        .unwrap();
     write_buf.clear();
 
     // Receive loop
@@ -422,8 +433,14 @@ async fn get_node_addrs_v2(
         match msg {
             NetworkMessage::Version(ver) => {
                 // Send verack and getaddr
-                protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::Verack {}))).await.unwrap();
-                protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::GetAddr {}))).await.unwrap();
+                protocol
+                    .write(&Payload::genuine(V2Serialize(V2NetworkMessage::Verack {})))
+                    .await
+                    .unwrap();
+                protocol
+                    .write(&Payload::genuine(V2Serialize(V2NetworkMessage::GetAddr {})))
+                    .await
+                    .unwrap();
 
                 let mut new_info = node.clone();
                 new_info.last_tried = tried_timestamp;
@@ -508,7 +525,10 @@ async fn get_node_addrs_v2(
                 break;
             }
             NetworkMessage::Ping(ping) => {
-                protocol.write(&Payload::genuine(V2Serialize(V2NetworkMessage::Pong(ping)))).await.unwrap();
+                protocol
+                    .write(&Payload::genuine(V2Serialize(V2NetworkMessage::Pong(ping))))
+                    .await
+                    .unwrap();
             }
             _ => (),
         };
@@ -624,7 +644,8 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
 
                 println!("Connected to {} for v1 crawl", &node.addr.to_string());
 
-                let ret = get_node_addrs_v1(&mut v1_sock, node, &net_status, tried_timestamp, age).await;
+                let ret =
+                    get_node_addrs_v1(&mut v1_sock, node, &net_status, tried_timestamp, age).await;
                 match ret {
                     Ok(r) => ret_addrs.extend(r),
                     Err(e) => {
