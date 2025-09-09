@@ -627,7 +627,12 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
 
     println!("Connected to {} for v2 crawl", &node.addr.to_string());
 
-    let ret = get_node_addrs_v2(&mut v2_sock, node, &net_status, tried_timestamp, age).await;
+    let ret = timeout(
+        time::Duration::from_secs(30),
+        get_node_addrs_v2(&mut v2_sock, node, &net_status, tried_timestamp, age),
+    )
+    .await
+    .unwrap();
     match ret {
         Ok(r) => ret_addrs.extend(r),
         Err(e) => {
@@ -644,8 +649,12 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
 
                 println!("Connected to {} for v1 crawl", &node.addr.to_string());
 
-                let ret =
-                    get_node_addrs_v1(&mut v1_sock, node, &net_status, tried_timestamp, age).await;
+                let ret = timeout(
+                    time::Duration::from_secs(30),
+                    get_node_addrs_v1(&mut v1_sock, node, &net_status, tried_timestamp, age),
+                )
+                .await
+                .unwrap();
                 match ret {
                     Ok(r) => ret_addrs.extend(r),
                     Err(e) => {
