@@ -851,12 +851,14 @@ pub async fn crawler_thread(
                 let _permit = permit;
                 let addrs = crawl_node(&node, net_status_c).await;
 
+                /*
                 println!(
                     "Crawler thread - {}: Waiting for database",
                     &node.addr.to_string()
                 );
+                */
                 let locked_db_conn = f_db_conn.lock().unwrap();
-                println!("Crawler thread - {}: Have database", &node.addr.to_string());
+                //println!("Crawler thread - {}: Have database", &node.addr.to_string());
                 locked_db_conn.execute("BEGIN TRANSACTION", []).unwrap();
                 for crawled in addrs {
                     match crawled {
@@ -980,10 +982,12 @@ pub async fn crawler_thread(
                     }
                 }
                 locked_db_conn.execute("COMMIT TRANSACTION", []).unwrap();
+                /*
                 println!(
                     "Crawler thread - {}: Done with database",
                     &node.addr.to_string()
                 );
+                */
 
                 {
                     f_in_flight.lock().unwrap().remove(&node.addr);
