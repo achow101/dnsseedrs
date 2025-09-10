@@ -695,6 +695,11 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
             },
             Err(_) => {
                 println!("{} v1 connection timed out", &node.addr.to_string());
+                let mut node_info = node.clone();
+                node_info.last_tried = tried_timestamp;
+                ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+                v1_sock.shutdown().await.unwrap();
+                return ret_addrs;
             }
         };
         v1_sock.shutdown().await.unwrap();
