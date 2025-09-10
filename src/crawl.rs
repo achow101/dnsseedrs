@@ -554,27 +554,21 @@ async fn connect_node(
     net_status: &NetStatus,
 ) -> Result<TcpStream, Box<dyn Error + Send + Sync>> {
     match node.addr.host {
-        Host::Ipv4(ip) if net_status.ipv4 => {
-            Ok(timeout(
-                time::Duration::from_secs(10),
-                TcpStream::connect(&SocketAddr::new(IpAddr::V4(ip), node.addr.port)),
-            )
-            .await??)
-        }
-        Host::Ipv6(ip) if net_status.ipv6 => {
-            Ok(timeout(
-                time::Duration::from_secs(10),
-                TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
-            )
-            .await??)
-        }
-        Host::CJDNS(ip) if net_status.cjdns => {
-            Ok(timeout(
-                time::Duration::from_secs(10),
-                TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
-            )
-            .await??)
-        }
+        Host::Ipv4(ip) if net_status.ipv4 => Ok(timeout(
+            time::Duration::from_secs(10),
+            TcpStream::connect(&SocketAddr::new(IpAddr::V4(ip), node.addr.port)),
+        )
+        .await??),
+        Host::Ipv6(ip) if net_status.ipv6 => Ok(timeout(
+            time::Duration::from_secs(10),
+            TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
+        )
+        .await??),
+        Host::CJDNS(ip) if net_status.cjdns => Ok(timeout(
+            time::Duration::from_secs(10),
+            TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
+        )
+        .await??),
         Host::OnionV3(ref host) if net_status.onion_proxy.is_some() => {
             let proxy_addr = net_status.onion_proxy.as_ref().unwrap();
             let mut stream = timeout(
