@@ -118,6 +118,8 @@ async fn socks5_connect(
         let mut server_bound_addr: [u8; 16] = [0; 16];
         sock.read_exact(&mut server_bound_addr).await.unwrap();
     }
+    let mut server_bound_port: [u8; 2] = [0; 2];
+    sock.read_exact(&mut server_bound_port).await.unwrap();
 
     Ok(())
 }
