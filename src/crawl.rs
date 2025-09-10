@@ -627,55 +627,70 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
 
     println!("Connected to {} for v2 crawl", &node.addr.to_string());
 
-    let ret = timeout(
+    match timeout(
         time::Duration::from_secs(30),
         get_node_addrs_v2(&mut v2_sock, node, &net_status, tried_timestamp, age),
     )
     .await
-    .unwrap();
-    match ret {
-        Ok(r) => ret_addrs.extend(r),
-        Err(e) => {
-            if e.is::<V2ConnectError>() {
-                let v1_conn_res = connect_node(node, &net_status).await;
-                if v1_conn_res.is_err() {
+    {
+        Ok(v1_ret) => match v1_ret {
+            Ok(r) => ret_addrs.extend(r),
+            Err(v2_err) => {
+                if !v2_err.is::<V2ConnectError>() {
                     let mut node_info = node.clone();
                     node_info.last_tried = tried_timestamp;
                     ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
-                    println!("Failed connect: {}", &node.addr.to_string());
+                    println!("Failed crawl: {}, {}", &node.addr.to_string(), v2_err);
+                    v2_sock.shutdown().await.unwrap();
                     return ret_addrs;
                 }
-                let mut v1_sock = v1_conn_res.unwrap();
-
-                println!("Connected to {} for v1 crawl", &node.addr.to_string());
-
-                let ret = timeout(
-                    time::Duration::from_secs(30),
-                    get_node_addrs_v1(&mut v1_sock, node, &net_status, tried_timestamp, age),
-                )
-                .await
-                .unwrap();
-                match ret {
-                    Ok(r) => ret_addrs.extend(r),
-                    Err(e) => {
-                        let mut node_info = node.clone();
-                        node_info.last_tried = tried_timestamp;
-                        ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
-                        println!("Failed crawl: {}, {}", &node.addr.to_string(), e);
-                    }
-                }
-                v1_sock.shutdown().await.unwrap();
-            } else {
-                let mut node_info = node.clone();
-                node_info.last_tried = tried_timestamp;
-                ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
-                println!("Failed crawl: {}, {}", &node.addr.to_string(), e);
             }
+        },
+        Err(_) => {
+            println!("{} v2 connection timed out", &node.addr.to_string());
         }
+    };
+    v2_sock.shutdown().await.unwrap();
+
+    if ret_addrs.len() == 0 {
+        // Only timeout or V2ConnectError failures, so try v1
+        let v1_conn_res = connect_node(node, &net_status).await;
+        if v1_conn_res.is_err() {
+            let mut node_info = node.clone();
+            node_info.last_tried = tried_timestamp;
+            ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+            println!("Failed connect: {}", &node.addr.to_string());
+            return ret_addrs;
+        }
+        let mut v1_sock = v1_conn_res.unwrap();
+
+        println!("Connected to {} for v1 crawl", &node.addr.to_string());
+
+        match timeout(
+            time::Duration::from_secs(30),
+            get_node_addrs_v1(&mut v1_sock, node, &net_status, tried_timestamp, age),
+        )
+        .await
+        {
+            Ok(v1_ret) => match v1_ret {
+                Ok(r) => ret_addrs.extend(r),
+                Err(v1_err) => {
+                    let mut node_info = node.clone();
+                    node_info.last_tried = tried_timestamp;
+                    ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+                    println!("Failed crawl: {}, {}", &node.addr.to_string(), v1_err);
+                    v1_sock.shutdown().await.unwrap();
+                    return ret_addrs;
+                }
+            },
+            Err(_) => {
+                println!("{} v1 connection timed out", &node.addr.to_string());
+            }
+        };
+        v1_sock.shutdown().await.unwrap();
     }
 
     println!("Done {}", &node.addr.to_string());
-    v2_sock.shutdown().await.unwrap();
     ret_addrs
 }
 
