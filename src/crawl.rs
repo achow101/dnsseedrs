@@ -54,6 +54,15 @@ impl std::fmt::Display for V2ConnectError {
 }
 impl Error for V2ConnectError {}
 
+#[derive(Debug)]
+struct NetNotAvailableError {}
+impl std::fmt::Display for NetNotAvailableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Network not available")
+    }
+}
+impl Error for NetNotAvailableError {}
+
 async fn socks5_connect(
     sock: &mut TcpStream,
     destination: &String,
@@ -396,7 +405,8 @@ async fn get_node_addrs_v2(
     .await
     {
         Ok(p) => p,
-        Err(..) => {
+        Err(e) => {
+            println!("V2 Connection failed {}", e.to_string());
             return Err(Box::new(V2ConnectError {}));
         }
     };
@@ -540,28 +550,28 @@ async fn get_node_addrs_v2(
 async fn connect_node(
     node: &NodeInfo,
     net_status: &NetStatus,
-) -> Result<TcpStream, std::io::Error> {
+) -> Result<TcpStream, Box<dyn Error + Send + Sync>> {
     match node.addr.host {
         Host::Ipv4(ip) if net_status.ipv4 => {
-            timeout(
+            Ok(timeout(
                 time::Duration::from_secs(10),
                 TcpStream::connect(&SocketAddr::new(IpAddr::V4(ip), node.addr.port)),
             )
-            .await?
+            .await??)
         }
         Host::Ipv6(ip) if net_status.ipv6 => {
-            timeout(
+            Ok(timeout(
                 time::Duration::from_secs(10),
                 TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
             )
-            .await?
+            .await??)
         }
         Host::CJDNS(ip) if net_status.cjdns => {
-            timeout(
+            Ok(timeout(
                 time::Duration::from_secs(10),
                 TcpStream::connect(&SocketAddr::new(IpAddr::V6(ip), node.addr.port)),
             )
-            .await?
+            .await??)
         }
         Host::OnionV3(ref host) if net_status.onion_proxy.is_some() => {
             let proxy_addr = net_status.onion_proxy.as_ref().unwrap();
@@ -573,11 +583,11 @@ async fn connect_node(
             if let Ok(mut_stream) = &mut stream {
                 let cr = socks5_connect(mut_stream, host, node.addr.port).await;
                 match cr {
-                    Ok(_) => stream,
-                    Err(e) => Err(std::io::Error::other(e)),
+                    Ok(_) => Ok(stream?),
+                    Err(e) => Err(Box::new(std::io::Error::other(e))),
                 }
             } else {
-                stream
+                Ok(stream?)
             }
         }
         Host::I2P(ref host) if net_status.i2p_proxy.is_some() => {
@@ -590,14 +600,14 @@ async fn connect_node(
             if let Ok(mut_stream) = &mut stream {
                 let cr = socks5_connect(mut_stream, host, node.addr.port).await;
                 match cr {
-                    Ok(_) => stream,
-                    Err(e) => Err(std::io::Error::other(e)),
+                    Ok(_) => Ok(stream?),
+                    Err(e) => Err(Box::new(std::io::Error::other(e))),
                 }
             } else {
-                stream
+                Ok(stream?)
             }
         }
-        _ => Err(std::io::Error::other("Net not available")),
+        _ => Err(Box::new(NetNotAvailableError {})),
     }
 }
 
@@ -616,11 +626,15 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
     );
 
     let v2_conn_res = connect_node(node, &net_status).await;
-    if v2_conn_res.is_err() {
-        let mut node_info = node.clone();
-        node_info.last_tried = tried_timestamp;
-        ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
-        println!("Failed connect: {}", &node.addr.to_string());
+    if let Err(v2_conn_err) = v2_conn_res {
+        if v2_conn_err.is::<NetNotAvailableError>() {
+            println!("Network not available for {}", &node.addr.to_string());
+        } else {
+            let mut node_info = node.clone();
+            node_info.last_tried = tried_timestamp;
+            ret_addrs.push(CrawledNode::Failed(CrawlInfo { node_info, age }));
+            println!("Failed connect: {}", &node.addr.to_string());
+        }
         return ret_addrs;
     }
     let mut v2_sock = v2_conn_res.unwrap();
