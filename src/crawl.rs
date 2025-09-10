@@ -866,6 +866,7 @@ pub async fn crawler_thread(
             tokio::spawn(async move {
                 let _permit = permit;
                 let addrs = crawl_node(&node, net_status_c).await;
+                let six_months = time::Duration::from_secs(60 * 60 * 24 * 183);
 
                 /*
                 println!(
@@ -879,55 +880,76 @@ pub async fn crawler_thread(
                 for crawled in addrs {
                     match crawled {
                         CrawledNode::Failed(info) => {
-                            locked_db_conn
-                                .execute(
-                                    "
-                                UPDATE nodes SET
-                                    last_tried = ?,
-                                    try_count = ?,
-                                    reliability_2h = ?,
-                                    reliability_8h = ?,
-                                    reliability_1d = ?,
-                                    reliability_1w = ?,
-                                    reliability_1m = ?
-                                WHERE address = ?",
-                                    params![
-                                        info.node_info.last_tried,
-                                        info.node_info.try_count + 1,
-                                        calculate_reliability(
-                                            false,
-                                            info.node_info.reliability_2h,
-                                            info.age,
-                                            3600 * 2
-                                        ),
-                                        calculate_reliability(
-                                            false,
-                                            info.node_info.reliability_8h,
-                                            info.age,
-                                            3600 * 8
-                                        ),
-                                        calculate_reliability(
-                                            false,
-                                            info.node_info.reliability_1d,
-                                            info.age,
-                                            3600 * 24
-                                        ),
-                                        calculate_reliability(
-                                            false,
-                                            info.node_info.reliability_1w,
-                                            info.age,
-                                            3600 * 24 * 7
-                                        ),
-                                        calculate_reliability(
-                                            false,
-                                            info.node_info.reliability_1m,
-                                            info.age,
-                                            3600 * 24 * 30
-                                        ),
-                                        info.node_info.addr.to_string(),
-                                    ],
-                                )
-                                .unwrap();
+                            if (node.last_seen > 0
+                                && (time::SystemTime::UNIX_EPOCH
+                                    + time::Duration::from_secs(node.last_seen))
+                                .elapsed()
+                                .unwrap()
+                                    >= six_months)
+                                || (node.last_seen == 0 && node.try_count > 10)
+                            {
+                                println!(
+                                    "Deleting {} from database",
+                                    info.node_info.addr.to_string()
+                                );
+                                locked_db_conn
+                                    .execute(
+                                        "
+                                    DELETE FROM nodes Where address = ?",
+                                        params![info.node_info.addr.to_string(),],
+                                    )
+                                    .unwrap();
+                            } else {
+                                locked_db_conn
+                                    .execute(
+                                        "
+                                    UPDATE nodes SET
+                                        last_tried = ?,
+                                        try_count = ?,
+                                        reliability_2h = ?,
+                                        reliability_8h = ?,
+                                        reliability_1d = ?,
+                                        reliability_1w = ?,
+                                        reliability_1m = ?
+                                    WHERE address = ?",
+                                        params![
+                                            info.node_info.last_tried,
+                                            info.node_info.try_count + 1,
+                                            calculate_reliability(
+                                                false,
+                                                info.node_info.reliability_2h,
+                                                info.age,
+                                                3600 * 2
+                                            ),
+                                            calculate_reliability(
+                                                false,
+                                                info.node_info.reliability_8h,
+                                                info.age,
+                                                3600 * 8
+                                            ),
+                                            calculate_reliability(
+                                                false,
+                                                info.node_info.reliability_1d,
+                                                info.age,
+                                                3600 * 24
+                                            ),
+                                            calculate_reliability(
+                                                false,
+                                                info.node_info.reliability_1w,
+                                                info.age,
+                                                3600 * 24 * 7
+                                            ),
+                                            calculate_reliability(
+                                                false,
+                                                info.node_info.reliability_1m,
+                                                info.age,
+                                                3600 * 24 * 30
+                                            ),
+                                            info.node_info.addr.to_string(),
+                                        ],
+                                    )
+                                    .unwrap();
+                            }
                         }
                         CrawledNode::UpdatedInfo(info) => {
                             locked_db_conn
