@@ -2,7 +2,7 @@ use crate::common::{is_good, BindProtocol, Host, NodeInfo};
 use crate::dnssec::{parse_dns_keys_dir, DnsSigningKey, RecordsToSign};
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::{Arc, Mutex, RwLock},
@@ -33,6 +33,11 @@ use tokio::{
     net::{TcpListener, UdpSocket},
     time::{interval, timeout},
 };
+
+const IPV4_NET_GROUP_MASK: Ipv4Addr = Ipv4Addr::from_octets([0xff, 0xff, 0, 0]);
+const IPV6_NET_GROUP_MASK: Ipv6Addr = Ipv6Addr::from_segments([0xffff, 0xffff, 0, 0, 0, 0, 0, 0]);
+const IPV6_HE_NET_GROUP_MASK: Ipv6Addr =
+    Ipv6Addr::from_segments([0xffff, 0xffff, 0xf000, 0, 0, 0, 0, 0]);
 
 #[derive(Clone)]
 struct CachedAddrs {
@@ -699,9 +704,45 @@ async fn fill_cache(
         let mut rng = thread_rng();
         for addrs in new_cache.values_mut() {
             addrs.ipv4.shuffle(&mut rng);
-            addrs.ipv4.truncate(100);
+            let mut final_ipv4 = Vec::<Ipv4Addr>::new();
+            let mut ipv4_groups = HashSet::<Ipv4Addr>::new();
+            for addr in &addrs.ipv4 {
+                // Get the /16 group
+                let group = addr & IPV4_NET_GROUP_MASK;
+                if !ipv4_groups.contains(&group) {
+                    ipv4_groups.insert(group);
+                    final_ipv4.push(*addr);
+                    if final_ipv4.len() >= 100 {
+                        break;
+                    }
+                }
+            }
+            addrs.ipv4 = final_ipv4;
+
             addrs.ipv6.shuffle(&mut rng);
-            addrs.ipv6.truncate(100);
+            let mut final_ipv6 = Vec::<Ipv6Addr>::new();
+            let mut ipv6_groups = HashSet::<Ipv6Addr>::new();
+            for addr in &addrs.ipv6 {
+                // Check for Hurricane Electric and use /36 group if so
+                let group: Ipv6Addr = if addr.octets()[0] == 0x20
+                    && addr.octets()[1] == 0x01
+                    && addr.octets()[2] == 0x04
+                    && addr.octets()[3] == 0x70
+                {
+                    addr & IPV6_HE_NET_GROUP_MASK
+                } else {
+                    // Get the /32 group
+                    addr & IPV6_NET_GROUP_MASK
+                };
+                if !ipv6_groups.contains(&group) {
+                    ipv6_groups.insert(group);
+                    final_ipv6.push(*addr);
+                    if final_ipv6.len() >= 100 {
+                        break;
+                    }
+                }
+            }
+            addrs.ipv6 = final_ipv6
         }
 
         {
