@@ -1,3 +1,4 @@
+mod asmap;
 mod common;
 mod crawl;
 mod dns;
