@@ -118,6 +118,7 @@ pub fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
                 || ip4.is_documentation()
                 || ip4.is_broadcast()
             {
+                println!("{} is not globally accessible", ip4);
                 return Err("IPv4 addresses must be globally accessible");
             }
             return Ok(NodeAddress {
@@ -139,7 +140,15 @@ pub fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
                             == 0x2001_0001_0000_0000_0000_0000_0000_0002
                         || matches!(ip6.segments(), [0x2001, 3, _, _, _, _, _, _])
                         || matches!(ip6.segments(), [0x2001, 4, 0x112, _, _, _, _, _])
-                        || matches!(ip6.segments(), [0x2001, b, _, _, _, _, _, _] if (0x20..=0x2F).contains(&b))))
+                        || matches!(ip6.segments(), [0x2001, b, _, _, _, _, _, _] if (0x20..=0x3f).contains(&b))))
+                || matches!(ip6.segments(), [0x2002, _, _, _, _, _, _, _])
+                || matches!(
+                    ip6.segments(),
+                    [0x2001, 0xdb8, ..] | [0x3fff, 0..=0x0fff, ..]
+                )
+                || matches!(ip6.segments(), [0x5f00, ..])
+                || ip6.is_unique_local()
+                || ip6.is_unicast_link_local()
             {
                 // Check for CJDNS in fc00::/8
                 if matches!(
@@ -151,6 +160,7 @@ pub fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
                         port: parsed_addr.port(),
                     });
                 }
+                println!("{} is not globally accessible or CJDNS", ip6);
                 return Err("IPv6 addresses must be globally accessible or CJDNS");
             }
             return Ok(NodeAddress {
