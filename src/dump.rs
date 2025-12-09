@@ -1,14 +1,14 @@
 use crate::common::{is_good, NodeInfo};
 
 use std::{
-    fs::{rename, File},
-    io::{BufReader, Read, Write},
     path::Path,
     sync::{Arc, Mutex},
 };
 
+use async_compression::tokio::write::GzipEncoder;
 use bitcoin::network::Network;
-use flate2::{write::GzEncoder, Compression};
+use tokio::fs::{rename, File};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::time::{sleep, Duration};
 
 pub async fn dumper_thread(
@@ -67,11 +67,10 @@ pub async fn dumper_thread(
         }
 
         let txt_tmp_path = format!("{dump_file}.tmp");
-        let mut txt_tmp_file = File::create(&txt_tmp_path).unwrap();
+        let mut txt_tmp_file = File::create(&txt_tmp_path).await.unwrap();
         println!("Writing txt to temporary file {}", &txt_tmp_path);
-        writeln!(
-            txt_tmp_file,
-            "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}user_agent",
+        let header = format!(
+            "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}user_agent\n",
             "# address",
             "good",
             "last_seen",
@@ -83,11 +82,11 @@ pub async fn dumper_thread(
             "blocks",
             "services",
             "version"
-        )
-        .unwrap();
+        );
+        let _ = txt_tmp_file.write(header.as_bytes()).await.unwrap();
         for node in nodes {
-            writeln!(txt_tmp_file,
-                "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}\"{}\"",
+            let line = format!(
+                "{:<70}{:<6}{:<12}{:>6.2}% {:>6.2}% {:>6.2}% {:>6.2}% {:>7.2}% {:<8}{:0>16x}  {:<8}\"{}\"\n",
                 node.addr.to_string(),
                 i32::from(is_good(&node, chain)),
                 node.last_seen,
@@ -100,32 +99,34 @@ pub async fn dumper_thread(
                 node.services,
                 node.protocol_version,
                 node.user_agent,
-            ).unwrap();
+            );
+            let _ = txt_tmp_file.write(line.as_bytes()).await.unwrap();
         }
+        txt_tmp_file.flush().await.unwrap();
         println!("Renaming {txt_tmp_path} to {dump_file}");
-        rename(txt_tmp_path.clone(), dump_file).unwrap();
+        rename(txt_tmp_path.clone(), dump_file).await.unwrap();
 
         // Compress with gz
         let gz_tmp_path = format!("{dump_file}.gz.tmp");
         println!("Writing gz to temporary file {gz_tmp_path}");
-        let gz_tmp_file = File::create(&gz_tmp_path).unwrap();
-        let mut enc = GzEncoder::new(gz_tmp_file, Compression::default());
-        let f = File::open(dump_file).unwrap();
+        let gz_tmp_file = File::create(&gz_tmp_path).await.unwrap();
+        let mut enc = GzipEncoder::new(gz_tmp_file);
+        let f = File::open(dump_file).await.unwrap();
         let mut reader = BufReader::new(f);
 
         let mut buffer = [0; 1024 * 256];
         loop {
-            match reader.read(&mut buffer) {
+            match reader.read(&mut buffer).await {
                 Ok(0) => break, // EOF
-                Ok(count) => enc.write_all(&buffer[..count]).unwrap(),
+                Ok(count) => enc.write_all(&buffer[..count]).await.unwrap(),
                 Err(e) => panic!("Failed to read from file: {e}"),
             }
         }
-        enc.finish().unwrap();
+        enc.shutdown().await.unwrap();
 
         let gz_path = format!("{dump_file}.gz");
         let archive_path = Path::new(&gz_path);
         println!("Renaming {gz_tmp_path} to {archive_path:?}");
-        rename(gz_tmp_path, archive_path).unwrap();
+        rename(gz_tmp_path, archive_path).await.unwrap();
     }
 }
