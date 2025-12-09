@@ -5,7 +5,7 @@ mod dnssec;
 mod dump;
 
 use crate::{
-    common::{BindProtocol, NetStatus},
+    common::{parse_address, BindProtocol, NetStatus},
     crawl::crawler_thread,
     dns::dns_thread,
     dump::dumper_thread,
@@ -182,6 +182,25 @@ async fn main() {
             new_node_stmt
                 .execute(params![arg, 0_u64.to_be_bytes()])
                 .unwrap();
+        }
+
+        // Remove all nodes that have invalid addresses
+        let mut select_nodes = locked_db_conn.prepare("SELECT address FROM nodes").unwrap();
+        let node_iter = select_nodes
+            .query_map([], |row| Ok(row.get::<usize, String>(0).unwrap()))
+            .unwrap();
+        for node in node_iter {
+            let addr = node.unwrap();
+            match parse_address(&addr) {
+                Ok(_) => (),
+                Err(_) => {
+                    println!("Deleting invalid node {}", addr);
+                    let mut del_stmt = locked_db_conn
+                        .prepare("DELETE FROM nodes WHERE address = ?")
+                        .unwrap();
+                    del_stmt.execute(params![addr]).unwrap();
+                }
+            }
         }
     }
 

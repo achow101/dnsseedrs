@@ -104,7 +104,7 @@ impl NodeInfo {
     }
 }
 
-fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
+pub fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
     let addr_parse_res = SocketAddr::from_str(addr);
     if let Ok(parsed_addr) = addr_parse_res {
         let ip = parsed_addr.ip().to_canonical();
