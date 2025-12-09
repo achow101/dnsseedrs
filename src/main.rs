@@ -6,6 +6,7 @@ mod dnssec;
 mod dump;
 
 use crate::{
+    asmap::decode_asmap,
     common::{parse_address, BindProtocol, NetStatus},
     crawl::crawler_thread,
     dns::dns_thread,
@@ -67,6 +68,10 @@ struct Args {
     #[arg(long)]
     dnssec_keys: Option<String>,
 
+    /// The path to an asmap file
+    #[arg(long)]
+    asmap: Option<String>,
+
     /// The domain name for which this server will return results for
     #[arg()]
     seed_domain: String,
@@ -104,6 +109,18 @@ async fn main() {
             println!("{} is not a directory", dnssec_keys);
             std::process::exit(1);
         }
+    }
+
+    // Open the ASMap file
+    let asmap: Option<Vec<bool>>;
+    if let Some(asmap_path) = &args.asmap {
+        if !Path::new(asmap_path).is_file() {
+            println!("{} is not a file", asmap_path);
+            std::process::exit(1);
+        }
+        asmap = Some(decode_asmap(&args.asmap.unwrap()));
+    } else {
+        asmap = None;
     }
 
     // Parse the binds
@@ -231,6 +248,7 @@ async fn main() {
             &args.soa_rname,
             &chain,
             args.dnssec_keys,
+            asmap,
         )
         .await;
     });

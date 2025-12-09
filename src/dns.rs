@@ -1,3 +1,4 @@
+use crate::asmap::interpret;
 use crate::common::{is_good, BindProtocol, Host, NodeInfo};
 use crate::dnssec::{parse_dns_keys_dir, DnsSigningKey, RecordsToSign};
 
@@ -645,6 +646,7 @@ async fn fill_cache(
     cache: Arc<RwLock<HashMap<ServiceFlags, CachedAddrs>>>,
     seeder: Arc<SeederInfo>,
     db_conn: Arc<Mutex<rusqlite::Connection>>,
+    asmap: Option<Vec<bool>>,
 ) {
     let mut interval = interval(time::Duration::from_secs(600));
     loop {
@@ -703,17 +705,38 @@ async fn fill_cache(
         // Shuffle cached nodes and truncate to 100 nodes each
         let mut rng = thread_rng();
         for addrs in new_cache.values_mut() {
+            //println!("Cache set");
             addrs.ipv4.shuffle(&mut rng);
             let mut final_ipv4 = Vec::<Ipv4Addr>::new();
             let mut ipv4_groups = HashSet::<Ipv4Addr>::new();
+            let mut ipv4_asns = HashSet::<u32>::new();
             for addr in &addrs.ipv4 {
-                // Get the /16 group
-                let group = addr & IPV4_NET_GROUP_MASK;
-                if !ipv4_groups.contains(&group) {
-                    ipv4_groups.insert(group);
-                    final_ipv4.push(*addr);
-                    if final_ipv4.len() >= 100 {
-                        break;
+                if let Some(asmap_data) = &asmap {
+                    let mut ip_bits = Vec::<bool>::new();
+                    // IPv4 in IPv6 Prefix
+                    ip_bits.resize(80, false);
+                    ip_bits.resize(96, true);
+                    let ip_int = addr.to_bits().reverse_bits();
+                    for bit in 0..u32::BITS {
+                        ip_bits.push(((ip_int >> bit) & 1) == 1)
+                    }
+                    let asn = interpret(asmap_data, ip_bits);
+                    if ipv4_asns.insert(asn) {
+                        //println!("Adding {}, ASN {} to cache", addr, asn);
+                        final_ipv4.push(*addr);
+                        if final_ipv4.len() >= 100 {
+                            break;
+                        }
+                    }
+                } else {
+                    // Get the /16 group
+                    let group = addr & IPV4_NET_GROUP_MASK;
+                    if !ipv4_groups.contains(&group) {
+                        ipv4_groups.insert(group);
+                        final_ipv4.push(*addr);
+                        if final_ipv4.len() >= 100 {
+                            break;
+                        }
                     }
                 }
             }
@@ -722,23 +745,40 @@ async fn fill_cache(
             addrs.ipv6.shuffle(&mut rng);
             let mut final_ipv6 = Vec::<Ipv6Addr>::new();
             let mut ipv6_groups = HashSet::<Ipv6Addr>::new();
+            let mut ipv6_asns = HashSet::<u32>::new();
             for addr in &addrs.ipv6 {
-                // Check for Hurricane Electric and use /36 group if so
-                let group: Ipv6Addr = if addr.octets()[0] == 0x20
-                    && addr.octets()[1] == 0x01
-                    && addr.octets()[2] == 0x04
-                    && addr.octets()[3] == 0x70
-                {
-                    addr & IPV6_HE_NET_GROUP_MASK
+                if let Some(asmap_data) = &asmap {
+                    let mut ip_bits = Vec::<bool>::new();
+                    let ip_int = addr.to_bits().reverse_bits();
+                    for bit in 0..u128::BITS {
+                        ip_bits.push(((ip_int >> bit) & 1) == 1)
+                    }
+                    let asn = interpret(asmap_data, ip_bits);
+                    if ipv6_asns.insert(asn) {
+                        //println!("Adding {}, ASN {} to cache", addr, asn);
+                        final_ipv6.push(*addr);
+                        if final_ipv6.len() >= 100 {
+                            break;
+                        }
+                    }
                 } else {
-                    // Get the /32 group
-                    addr & IPV6_NET_GROUP_MASK
-                };
-                if !ipv6_groups.contains(&group) {
-                    ipv6_groups.insert(group);
-                    final_ipv6.push(*addr);
-                    if final_ipv6.len() >= 100 {
-                        break;
+                    // Check for Hurricane Electric and use /36 group if so
+                    let group: Ipv6Addr = if addr.octets()[0] == 0x20
+                        && addr.octets()[1] == 0x01
+                        && addr.octets()[2] == 0x04
+                        && addr.octets()[3] == 0x70
+                    {
+                        addr & IPV6_HE_NET_GROUP_MASK
+                    } else {
+                        // Get the /32 group
+                        addr & IPV6_NET_GROUP_MASK
+                    };
+                    if !ipv6_groups.contains(&group) {
+                        ipv6_groups.insert(group);
+                        final_ipv6.push(*addr);
+                        if final_ipv6.len() >= 100 {
+                            break;
+                        }
                     }
                 }
             }
@@ -764,6 +804,7 @@ pub async fn dns_thread(
     soa_rname: &str,
     chain: &Network,
     dnssec_keys: Option<String>,
+    asmap: Option<Vec<bool>>,
 ) {
     #[allow(clippy::single_char_pattern)]
     let cache = Arc::new(RwLock::new(HashMap::<ServiceFlags, CachedAddrs>::new()));
@@ -781,7 +822,7 @@ pub async fn dns_thread(
     let seeder_c = seeder.clone();
     let db_conn_c = db_conn.clone();
     tokio::spawn(async move {
-        fill_cache(cache_c, seeder_c, db_conn_c).await;
+        fill_cache(cache_c, seeder_c, db_conn_c, asmap).await;
     });
 
     while binds.len() > 1 {
