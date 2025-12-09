@@ -98,9 +98,11 @@ async fn main() {
     let chain = chain_p.unwrap();
 
     // Check that DNSSEC keys directory is a directory
-    if args.dnssec_keys.is_some() && !Path::new(&args.dnssec_keys.as_ref().unwrap()).is_dir() {
-        println!("{} is not a directory", args.dnssec_keys.unwrap());
-        std::process::exit(1);
+    if let Some(dnssec_keys) = &args.dnssec_keys {
+        if !Path::new(dnssec_keys).is_dir() {
+            println!("{} is not a directory", dnssec_keys);
+            std::process::exit(1);
+        }
     }
 
     // Parse the binds

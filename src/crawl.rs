@@ -408,7 +408,7 @@ async fn get_node_addrs_v2(
     {
         Ok(p) => p,
         Err(e) => {
-            println!("V2 Connection failed {}", e.to_string());
+            println!("V2 Connection failed {}", e);
             return Err(Box::new(V2ConnectError {}));
         }
     };
@@ -662,7 +662,7 @@ async fn crawl_node(node: &NodeInfo, net_status: NetStatus) -> Vec<CrawledNode> 
     };
     v2_sock.shutdown().await.unwrap();
 
-    if ret_addrs.len() == 0 {
+    if ret_addrs.is_empty() {
         // Only timeout or V2ConnectError failures, so try v1
         let v1_conn_res = connect_node(node, &net_status).await;
         if v1_conn_res.is_err() {
@@ -887,10 +887,7 @@ pub async fn crawler_thread(
                                     >= six_months)
                                 || (node.last_seen == 0 && node.try_count > 10)
                             {
-                                println!(
-                                    "Deleting {} from database",
-                                    info.node_info.addr.to_string()
-                                );
+                                println!("Deleting {} from database", info.node_info.addr);
                                 locked_db_conn
                                     .execute(
                                         "
