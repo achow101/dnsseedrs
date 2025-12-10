@@ -704,8 +704,8 @@ async fn fill_cache(
 
         // Shuffle cached nodes and truncate to 100 nodes each
         let mut rng = thread_rng();
-        for addrs in new_cache.values_mut() {
-            //println!("Cache set");
+        for (service_bits, addrs) in new_cache.iter_mut() {
+            println!("Cache for service bits {}", service_bits);
             addrs.ipv4.shuffle(&mut rng);
             let mut final_ipv4 = Vec::<Ipv4Addr>::new();
             let mut ipv4_groups = HashSet::<Ipv4Addr>::new();
@@ -722,7 +722,7 @@ async fn fill_cache(
                     }
                     let asn = interpret(asmap_data, ip_bits);
                     if ipv4_asns.insert(asn) {
-                        //println!("Adding {}, ASN {} to cache", addr, asn);
+                        println!("Adding {}, ASN {} to cache", addr, asn);
                         final_ipv4.push(*addr);
                         if final_ipv4.len() >= 100 {
                             break;
@@ -732,6 +732,7 @@ async fn fill_cache(
                     // Get the /16 group
                     let group = addr & IPV4_NET_GROUP_MASK;
                     if !ipv4_groups.contains(&group) {
+                        println!("Adding {}, Group {} to cache", addr, group);
                         ipv4_groups.insert(group);
                         final_ipv4.push(*addr);
                         if final_ipv4.len() >= 100 {
@@ -755,7 +756,7 @@ async fn fill_cache(
                     }
                     let asn = interpret(asmap_data, ip_bits);
                     if ipv6_asns.insert(asn) {
-                        //println!("Adding {}, ASN {} to cache", addr, asn);
+                        println!("Adding {}, ASN {} to cache", addr, asn);
                         final_ipv6.push(*addr);
                         if final_ipv6.len() >= 100 {
                             break;
@@ -774,6 +775,7 @@ async fn fill_cache(
                         addr & IPV6_NET_GROUP_MASK
                     };
                     if !ipv6_groups.contains(&group) {
+                        println!("Adding {}, Group {} to cache", addr, group);
                         ipv6_groups.insert(group);
                         final_ipv6.push(*addr);
                         if final_ipv6.len() >= 100 {
