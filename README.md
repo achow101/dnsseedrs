@@ -148,6 +148,14 @@ Record set as applicable.
 
 ## Installation
 
+### NixOS
+
+A NixOS module is available for declarative deployment, including multi-instance
+support and systemd hardening. See [nixos/README.md](nixos/README.md) for setup
+instructions.
+
+### Manual
+
 DNSSeedrs is a single self contained binary. Simple compile it with `cargo build --release` and
 the resulting `dnsseedrs` binary can be used as a simple server binary.
 
