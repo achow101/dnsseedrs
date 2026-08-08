@@ -126,15 +126,14 @@ async fn main() {
     // Parse the binds
     let mut bindset = HashSet::<(BindProtocol, SocketAddr)>::new();
     for bind in args.bind {
-        let proto: BindProtocol;
-        if bind.starts_with("udp://") {
-            proto = BindProtocol::Udp
+        let proto: BindProtocol = if bind.starts_with("udp://") {
+            BindProtocol::Udp
         } else if bind.starts_with("tcp://") {
-            proto = BindProtocol::Tcp
+            BindProtocol::Tcp
         } else {
             println!("{bind} is not a valid bind");
             std::process::exit(1);
-        }
+        };
         let bind_addr = match SocketAddr::from_str(&bind[6..]) {
             Ok(a) => a,
             Err(_) => {

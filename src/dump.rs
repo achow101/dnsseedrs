@@ -68,7 +68,7 @@ pub async fn dumper_thread(
 
         let txt_tmp_path = format!("{dump_file}.tmp");
         let mut txt_tmp_file = File::create(&txt_tmp_path).await.unwrap();
-        println!("Writing txt to temporary file {}", &txt_tmp_path);
+        println!("Writing txt to temporary file {}", txt_tmp_path);
         let header = format!(
             "{:<70}{:<6}{:<12}{:^8}{:^8}{:^8}{:^8}{:^8}{:^9}{:<18}{:<8}user_agent\n",
             "# address",
