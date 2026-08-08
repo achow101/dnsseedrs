@@ -220,6 +220,12 @@ pub fn is_good(node: &NodeInfo, chain: &Network) -> bool {
             }
         }
     }
+
+    let user_agent = node.user_agent.to_lowercase();
+    if user_agent.contains("bip110") || user_agent.contains("bip-110") {
+        return false;
+    }
+
     if !ServiceFlags::from(node.services).has(ServiceFlags::NETWORK) {
         return false;
     }
