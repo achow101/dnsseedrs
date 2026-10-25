@@ -33,7 +33,7 @@ Options:
 
 ## Structure
 
-DNSSeedrs is has three componenets:
+DNSSeedrs has three componenets:
 
 1. A crawler
 2. Database dumper
