@@ -9,8 +9,9 @@ edition = "2021"
 async-compression = { version = "0.4.35", features = ["gzip", "tokio"] }
 base32ct = { version = "0.2.0", features = ["alloc"] }
 base64ct = { version = "~1.6.0", features = ["alloc"] }
-bip324 = { version = "0.10.0", features = ["tokio"] }
-bitcoin = "0.32.6"
+bip324 = { version = "0.11.1", features = ["tokio"] }
+bitcoin = { git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "94c6f7917fd4376ef3aae4037e5064b0ec599d1e", default-features = false }
+p2p = { package = "bitcoin-p2p-messages", git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "94c6f7917fd4376ef3aae4037e5064b0ec599d1e" }
 clap = { version = "4.5.1", features = ["derive"] }
 domain = { version = "0.10.1", features = ["sign"] }
 rand = "0.8.5"

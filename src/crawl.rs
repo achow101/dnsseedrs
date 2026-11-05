@@ -3,7 +3,6 @@ use crate::common::{Host, NetStatus, NodeAddress, NodeInfo};
 use std::{
     collections::HashSet,
     error::Error,
-    io::BufReader as StdBufReader,
     net::{IpAddr, SocketAddr},
     str::FromStr,
     sync::{Arc, Mutex},
@@ -13,17 +12,12 @@ use std::{
 use base32ct::{Base32Unpadded, Encoding};
 use bip324::futures::Protocol as V2Protocol;
 use bip324::io::Payload;
-use bip324::serde::{
-    deserialize as V2Deserialize, serialize as V2Serialize, NetworkMessage as V2NetworkMessage,
-};
-use bitcoin::{
-    consensus::{Decodable, Encodable},
-    p2p::{
-        address::{AddrV2, Address},
-        message::{NetworkMessage, RawNetworkMessage, MAX_MSG_SIZE},
-        message_network::VersionMessage,
-        Magic, ServiceFlags,
-    },
+use bitcoin::encoding::{decode_from_slice, encode_to_vec, encode_to_writer};
+use p2p::{
+    address::{AddrV2, Address},
+    message::{NetworkMessage, Pong, V1NetworkMessage, V2NetworkMessage, MAX_MSG_SIZE},
+    message_network::{UserAgent, VersionMessage},
+    Magic, NetworkExt, ProtocolVersion, ServiceFlags,
 };
 use rusqlite::params;
 use sha3::{Digest, Sha3_256};
@@ -33,6 +27,8 @@ use tokio::{
     sync::Semaphore,
     time::timeout,
 };
+
+const MAX_V2_PAYLOAD_SIZE: usize = 4_000_000;
 
 struct CrawlInfo {
     node_info: NodeInfo,
@@ -135,7 +131,7 @@ async fn get_node_addrs_v1(
     let mut write_buf = Vec::<u8>::new();
     let (mut read_sock, mut write_sock) = sock.split();
 
-    let net_magic = net_status.chain.magic();
+    let net_magic = net_status.chain.default_network_magic();
 
     // Prep Version message
     let addr_them = match &node.addr.host {
@@ -161,7 +157,7 @@ async fn get_node_addrs_v1(
         port: 0,
     };
     let ver_msg = VersionMessage {
-        version: 70016,
+        version: ProtocolVersion::WTXID_RELAY_VERSION,
         services: ServiceFlags::NONE,
         timestamp: i64::try_from(
             time::SystemTime::now()
@@ -173,18 +169,22 @@ async fn get_node_addrs_v1(
         receiver: addr_them,
         sender: addr_me,
         nonce: 0,
-        user_agent: "/crawlrs:0.2.0/".to_string(),
+        user_agent: UserAgent::from_nonstandard(&"/crawlrs:0.2.0/"),
         start_height: -1,
         relay: false,
     };
 
     // Send version message
-    RawNetworkMessage::new(net_magic, NetworkMessage::Version(ver_msg))
-        .consensus_encode(&mut write_buf)?;
+    encode_to_writer(
+        &V1NetworkMessage::new(net_magic, NetworkMessage::Version(ver_msg)),
+        &mut write_buf,
+    )?;
 
     // Send sendaddrv2 message
-    RawNetworkMessage::new(net_magic, NetworkMessage::SendAddrV2 {})
-        .consensus_encode(&mut write_buf)?;
+    encode_to_writer(
+        &V1NetworkMessage::new(net_magic, NetworkMessage::SendAddrV2 {}),
+        &mut write_buf,
+    )?;
     write_sock.write_all(&write_buf).await.unwrap();
     write_sock.flush().await.unwrap();
     write_buf.clear();
@@ -193,8 +193,8 @@ async fn get_node_addrs_v1(
     let mut reader = AsyncBufReader::new(&mut read_sock);
     loop {
         // Because I can't figure out how to use an async socket with rust-bitcoin's
-        // consensus_decode, we're going to read each message with a little bit of decoding
-        // from the socket ourselves, then pass it own to consensus_decode
+        // decode_from_slice, we're going to read each message with a little bit of decoding
+        // from the socket ourselves, then pass it own to decode_from_slice
 
         // Find the magic, always 4 bytes
         let mut msg = vec![0_u8; 4];
@@ -232,8 +232,7 @@ async fn get_node_addrs_v1(
         msg.extend(checksum);
 
         // Now let rust-bitcoin do its decoding
-        let mut msg_reader = StdBufReader::new(msg.as_slice());
-        let msg = match RawNetworkMessage::consensus_decode(&mut msg_reader) {
+        let msg = match decode_from_slice::<V1NetworkMessage>(&msg) {
             Ok(m) => m,
             Err(e) => {
                 return Err(std::io::Error::other(e.to_string()));
@@ -242,12 +241,16 @@ async fn get_node_addrs_v1(
         match msg.payload() {
             NetworkMessage::Version(ver) => {
                 // Send verack
-                RawNetworkMessage::new(net_magic, NetworkMessage::Verack {})
-                    .consensus_encode(&mut write_buf)?;
+                encode_to_writer(
+                    &V1NetworkMessage::new(net_magic, NetworkMessage::Verack {}),
+                    &mut write_buf,
+                )?;
 
                 // Send getaddr
-                RawNetworkMessage::new(net_magic, NetworkMessage::GetAddr {})
-                    .consensus_encode(&mut write_buf)?;
+                encode_to_writer(
+                    &V1NetworkMessage::new(net_magic, NetworkMessage::GetAddr {}),
+                    &mut write_buf,
+                )?;
 
                 let mut new_info = node.clone();
                 new_info.last_tried = tried_timestamp;
@@ -255,10 +258,10 @@ async fn get_node_addrs_v1(
                     .duration_since(time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-                new_info.user_agent.clone_from(&ver.user_agent);
+                new_info.user_agent = ver.user_agent.to_string();
                 new_info.services = ver.services.to_u64();
                 new_info.starting_height = ver.start_height;
-                new_info.protocol_version = ver.version;
+                new_info.protocol_version = u32::from(ver.version);
                 ret_addrs.push(CrawledNode::UpdatedInfo(CrawlInfo {
                     node_info: new_info,
                     age,
@@ -266,7 +269,8 @@ async fn get_node_addrs_v1(
             }
             NetworkMessage::Addr(addrs) => {
                 println!("Received addrv1 from {}", node.addr);
-                for (_, a) in addrs {
+                for entry in &addrs.0 {
+                    let a = &entry.address;
                     if let Ok(s) = a.socket_addr() {
                         if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
                             new_info.services = a.services.to_u64();
@@ -281,14 +285,13 @@ async fn get_node_addrs_v1(
             }
             NetworkMessage::AddrV2(addrs) => {
                 println!("Received addrv2 from {}", node.addr);
-                for a in addrs {
+                for a in &addrs.0 {
                     let addrstr = match a.addr {
                         AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => match a.socket_addr() {
                             Ok(s) => Ok(s.to_string()),
                             Err(..) => Err("IP type address couldn't be turned into SocketAddr"),
                         },
                         AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip, a.port)),
-                        AddrV2::TorV2(..) => Err("who's advertising torv2????"),
                         AddrV2::TorV3(host) => {
                             let mut to_hash: Vec<u8> = vec![];
                             to_hash.extend_from_slice(b".onion checksum");
@@ -332,8 +335,10 @@ async fn get_node_addrs_v1(
                 break;
             }
             NetworkMessage::Ping(ping) => {
-                RawNetworkMessage::new(net_magic, NetworkMessage::Pong(*ping))
-                    .consensus_encode(&mut write_buf)?;
+                encode_to_writer(
+                    &V1NetworkMessage::new(net_magic, NetworkMessage::Pong(Pong::from_ping(ping))),
+                    &mut write_buf,
+                )?;
             }
             _ => (),
         };
@@ -343,6 +348,20 @@ async fn get_node_addrs_v1(
     }
     Ok(ret_addrs)
 }
+
+fn decode_v2_message(contents: &[u8]) -> Result<V2NetworkMessage, std::io::Error> {
+    // BIP324 uses a one-byte short ID, or zero followed by a 12-byte command.
+    let command_len = if contents.first() == Some(&0) { 13 } else { 1 };
+    if contents.len().saturating_sub(command_len) > MAX_V2_PAYLOAD_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "V2 message payload exceeds max length",
+        ));
+    }
+
+    decode_from_slice(contents).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
 async fn get_node_addrs_v2(
     sock: &mut TcpStream,
     node: &NodeInfo,
@@ -377,7 +396,7 @@ async fn get_node_addrs_v2(
         port: 0,
     };
     let ver_msg = VersionMessage {
-        version: 70016,
+        version: ProtocolVersion::WTXID_RELAY_VERSION,
         services: ServiceFlags::NONE,
         timestamp: i64::try_from(
             time::SystemTime::now()
@@ -389,7 +408,7 @@ async fn get_node_addrs_v2(
         receiver: addr_them,
         sender: addr_me,
         nonce: 0,
-        user_agent: "/crawlrs:0.2.0/".to_string(),
+        user_agent: UserAgent::from_nonstandard(&"/crawlrs:0.2.0/"),
         start_height: -1,
         relay: false,
     };
@@ -397,7 +416,7 @@ async fn get_node_addrs_v2(
     let (read_sock, write_sock) = sock.split();
     let reader = AsyncBufReader::new(read_sock);
     let mut protocol = match V2Protocol::new(
-        net_status.chain,
+        net_status.chain.default_network_magic().to_bytes(),
         bip324::Role::Initiator,
         None,
         None, // no garbage or decoys
@@ -415,15 +434,15 @@ async fn get_node_addrs_v2(
 
     // Send version and sendaddrv2 messages
     protocol
-        .write(&Payload::genuine(V2Serialize(V2NetworkMessage::Version(
-            ver_msg,
+        .write(&Payload::genuine(encode_to_vec(&V2NetworkMessage::new(
+            NetworkMessage::Version(ver_msg),
         ))))
         .await
         .unwrap();
     protocol
-        .write(&Payload::genuine(V2Serialize(
-            V2NetworkMessage::SendAddrV2 {},
-        )))
+        .write(&Payload::genuine(encode_to_vec(&V2NetworkMessage::new(
+            NetworkMessage::SendAddrV2 {},
+        ))))
         .await
         .unwrap();
     write_buf.clear();
@@ -436,21 +455,25 @@ async fn get_node_addrs_v2(
                 return Err(Box::new(std::io::Error::other(e.to_string())));
             }
         };
-        let msg = match V2Deserialize(response.contents()) {
+        let msg = match decode_v2_message(response.contents()) {
             Ok(m) => m,
             Err(e) => {
-                return Err(Box::new(std::io::Error::other(e.to_string())));
+                return Err(Box::new(e));
             }
         };
-        match msg {
+        match msg.into_payload() {
             NetworkMessage::Version(ver) => {
                 // Send verack and getaddr
                 protocol
-                    .write(&Payload::genuine(V2Serialize(V2NetworkMessage::Verack {})))
+                    .write(&Payload::genuine(encode_to_vec(&V2NetworkMessage::new(
+                        NetworkMessage::Verack {},
+                    ))))
                     .await
                     .unwrap();
                 protocol
-                    .write(&Payload::genuine(V2Serialize(V2NetworkMessage::GetAddr {})))
+                    .write(&Payload::genuine(encode_to_vec(&V2NetworkMessage::new(
+                        NetworkMessage::GetAddr {},
+                    ))))
                     .await
                     .unwrap();
 
@@ -460,10 +483,10 @@ async fn get_node_addrs_v2(
                     .duration_since(time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs();
-                new_info.user_agent.clone_from(&ver.user_agent);
+                new_info.user_agent = ver.user_agent.to_string();
                 new_info.services = ver.services.to_u64();
                 new_info.starting_height = ver.start_height;
-                new_info.protocol_version = ver.version;
+                new_info.protocol_version = u32::from(ver.version);
                 ret_addrs.push(CrawledNode::UpdatedInfo(CrawlInfo {
                     node_info: new_info,
                     age,
@@ -471,7 +494,8 @@ async fn get_node_addrs_v2(
             }
             NetworkMessage::Addr(addrs) => {
                 println!("Received addrv1 from {}", node.addr);
-                for (_, a) in addrs {
+                for entry in addrs.0 {
+                    let a = entry.address;
                     if let Ok(s) = a.socket_addr() {
                         if let Ok(mut new_info) = NodeInfo::new(s.to_string()) {
                             new_info.services = a.services.to_u64();
@@ -486,14 +510,13 @@ async fn get_node_addrs_v2(
             }
             NetworkMessage::AddrV2(addrs) => {
                 println!("Received addrv2 from {}", node.addr);
-                for a in addrs {
+                for a in addrs.0 {
                     let addrstr = match a.addr {
                         AddrV2::Ipv4(..) | AddrV2::Ipv6(..) => match a.socket_addr() {
                             Ok(s) => Ok(s.to_string()),
                             Err(..) => Err("IP type address couldn't be turned into SocketAddr"),
                         },
                         AddrV2::Cjdns(ip) => Ok(format!("[{}]:{}", ip, a.port)),
-                        AddrV2::TorV2(..) => Err("who's advertising torv2????"),
                         AddrV2::TorV3(host) => {
                             let mut to_hash: Vec<u8> = vec![];
                             to_hash.extend_from_slice(b".onion checksum");
@@ -538,7 +561,9 @@ async fn get_node_addrs_v2(
             }
             NetworkMessage::Ping(ping) => {
                 protocol
-                    .write(&Payload::genuine(V2Serialize(V2NetworkMessage::Pong(ping))))
+                    .write(&Payload::genuine(encode_to_vec(&V2NetworkMessage::new(
+                        NetworkMessage::Pong(Pong::from_ping(&ping)),
+                    ))))
                     .await
                     .unwrap();
             }

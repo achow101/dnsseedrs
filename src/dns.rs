@@ -10,7 +10,7 @@ use std::{
     time,
 };
 
-use bitcoin::{network::Network, p2p::ServiceFlags};
+use bitcoin::network::Network;
 use domain::{
     base::{
         iana::{rcode::Rcode, rtype::Rtype, Class, SecAlg},
@@ -28,6 +28,7 @@ use domain::{
     },
     sign::{key::SigningKey, records::FamilyName},
 };
+use p2p::ServiceFlags;
 use rand::{seq::SliceRandom, thread_rng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},

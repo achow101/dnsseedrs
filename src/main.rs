@@ -22,7 +22,7 @@ use std::{
     thread, time,
 };
 
-use bitcoin::network::Network;
+use bitcoin::network::{Network, TestnetVersion};
 use clap::Parser;
 use rusqlite::params;
 
@@ -93,8 +93,8 @@ async fn main() {
     let chain_p = Network::from_core_arg(&args.chain);
     match chain_p {
         Ok(Network::Bitcoin)
-        | Ok(Network::Testnet)
-        | Ok(Network::Testnet4)
+        | Ok(Network::Testnet(TestnetVersion::V3))
+        | Ok(Network::Testnet(TestnetVersion::V4))
         | Ok(Network::Signet) => (),
         _ => {
             println!("Unsupported network type: {}", args.chain);

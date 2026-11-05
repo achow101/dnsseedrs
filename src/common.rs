@@ -3,7 +3,8 @@ use std::{
     str::FromStr,
 };
 
-use bitcoin::{network::Network, p2p::ServiceFlags};
+use bitcoin::network::{Network, TestnetVersion};
+use p2p::{NetworkExt, ServiceFlags};
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -191,21 +192,14 @@ pub fn parse_address(addr: &str) -> Result<NodeAddress, &'static str> {
 }
 
 fn default_port(chain: &Network) -> u16 {
-    match chain {
-        Network::Bitcoin => 8333,
-        Network::Testnet => 18333,
-        Network::Testnet4 => 48333,
-        Network::Signet => 38333,
-        Network::Regtest => 18444,
-        &_ => 0,
-    }
+    chain.default_p2p_port()
 }
 
 fn min_blocks(chain: &Network) -> i32 {
     match chain {
         Network::Bitcoin => 880000,
-        Network::Testnet => 3600000,
-        Network::Testnet4 => 65000,
+        Network::Testnet(TestnetVersion::V3) => 3600000,
+        Network::Testnet(TestnetVersion::V4) => 65000,
         Network::Signet => 230000,
         _ => 1,
     }
