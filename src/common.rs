@@ -200,6 +200,7 @@ fn min_blocks(chain: &Network) -> i32 {
         Network::Bitcoin => 880000,
         Network::Testnet(TestnetVersion::V3) => 3600000,
         Network::Testnet(TestnetVersion::V4) => 65000,
+        Network::Testnet(TestnetVersion::V5) => 0,
         Network::Signet => 230000,
         _ => 1,
     }
@@ -263,4 +264,29 @@ pub struct NetStatus {
 pub enum BindProtocol {
     Udp,
     Tcp,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn testnet5_peer_policy() {
+        let chain = Network::from_core_arg("testnet5").unwrap();
+        assert_eq!(default_port(&chain), 18353);
+        assert_eq!(min_blocks(&chain), 0);
+
+        let mut node = NodeInfo::new("8.8.8.8:18353".to_string()).unwrap();
+        node.services = (ServiceFlags::NETWORK | ServiceFlags::WITNESS).to_u64();
+        node.protocol_version = 70016;
+        node.try_count = 4;
+        node.reliability_2h = 1.0;
+        assert!(is_good(&node, &chain));
+
+        node.addr.port = 48333;
+        assert!(!is_good(&node, &chain));
+        node.addr.port = 18353;
+        node.starting_height = -1;
+        assert!(!is_good(&node, &chain));
+    }
 }

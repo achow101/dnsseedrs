@@ -10,8 +10,9 @@ async-compression = { version = "0.4.35", features = ["gzip", "tokio"] }
 base32ct = { version = "0.2.0", features = ["alloc"] }
 base64ct = { version = "~1.6.0", features = ["alloc"] }
 bip324 = { version = "0.11.1", features = ["tokio"] }
-bitcoin = { git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "94c6f7917fd4376ef3aae4037e5064b0ec599d1e", default-features = false }
-p2p = { package = "bitcoin-p2p-messages", git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "94c6f7917fd4376ef3aae4037e5064b0ec599d1e" }
+# Testnet5 support from the 2026-11-04-addtestnet5 branch, pinned until an upstream release.
+bitcoin = { git = "https://github.com/polespinasa/rust-bitcoin", rev = "0c849be510f6089beb8afaf6253e1e52a5498fef", default-features = false }
+p2p = { package = "bitcoin-p2p-messages", git = "https://github.com/polespinasa/rust-bitcoin", rev = "0c849be510f6089beb8afaf6253e1e52a5498fef" }
 clap = { version = "4.5.1", features = ["derive"] }
 domain = { version = "0.10.1", features = ["sign"] }
 rand = "0.8.5"
