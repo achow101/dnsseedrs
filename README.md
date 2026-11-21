@@ -71,7 +71,7 @@ seeds.
 
 #### Supported Chains
 
-The crawler supports crawling Bitcoin mainnet, testnet, and signet nodes.
+The crawler supports crawling Bitcoin mainnet, testnet, testnet4, testnet5, and signet nodes.
 
 #### Statistics
 
@@ -101,7 +101,7 @@ The DNS server will select a set of 20 random "good" addresses to serve. The
 1. The default port is used.
 2. `NODE_NETWORK` service flag is set.
 3. The protocol version is at least 70001.
-4. The node has at least 350,000 blocks
+4. The advertised height meets the minimum for the selected chain.
 5. The node has one of:
   * 2 hour reliability score of 85% and at least 2 connection attempts
   * 8 hour reliability score of 70% and at least 4 connection attempts

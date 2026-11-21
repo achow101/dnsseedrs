@@ -195,9 +195,9 @@ fn default_port(chain: &Network) -> u16 {
         Network::Bitcoin => 8333,
         Network::Testnet => 18333,
         Network::Testnet4 => 48333,
+        Network::Testnet5 => 18353,
         Network::Signet => 38333,
         Network::Regtest => 18444,
-        &_ => 0,
     }
 }
 
@@ -206,6 +206,7 @@ fn min_blocks(chain: &Network) -> i32 {
         Network::Bitcoin => 880000,
         Network::Testnet => 3600000,
         Network::Testnet4 => 65000,
+        Network::Testnet5 => 0,
         Network::Signet => 230000,
         _ => 1,
     }

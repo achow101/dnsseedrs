@@ -10,7 +10,7 @@ async-compression = { version = "0.4.35", features = ["gzip", "tokio"] }
 base32ct = { version = "0.2.0", features = ["alloc"] }
 base64ct = { version = "~1.6.0", features = ["alloc"] }
 bip324 = { version = "0.10.0", features = ["tokio"] }
-bitcoin = "0.32.6"
+bitcoin = "0.32.102"
 clap = { version = "4.5.1", features = ["derive"] }
 domain = { version = "0.10.1", features = ["sign"] }
 rand = "0.8.5"
@@ -19,3 +19,7 @@ rusqlite = "0.31.0"
 sha3 = "0.10.8"
 tar = "0.4.40"
 tokio = { version = "1.37.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[patch.crates-io]
+# Testnet5 backport on bitcoin-0.32.102, shared with BIP324's bitcoin dependency.
+bitcoin = { git = "https://github.com/polespinasa/rust-bitcoin", rev = "a5409a9fab3261a09fb6bc5a104041dd788cf199" }

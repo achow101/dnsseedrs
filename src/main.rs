@@ -95,6 +95,7 @@ async fn main() {
         Ok(Network::Bitcoin)
         | Ok(Network::Testnet)
         | Ok(Network::Testnet4)
+        | Ok(Network::Testnet5)
         | Ok(Network::Signet) => (),
         _ => {
             println!("Unsupported network type: {}", args.chain);
